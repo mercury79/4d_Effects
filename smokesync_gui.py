@@ -329,9 +329,6 @@ class SmokeSyncGUI(tk.Tk):
                         command=self._toggle_capture).pack(side="left")
         self.lbl_capture_pos = ttk.Label(capture, text="Posicion: -")
         self.lbl_capture_pos.pack(side="left", padx=10)
-        self.lbl_capture_legend = ttk.Label(capture, text="(sin atajos configurados)",
-                                             foreground="#666", wraplength=420)
-        self.lbl_capture_legend.pack(side="left", padx=10)
 
         cols = ("t", "device", "modo", "valor")
         self.tree_cues = ttk.Treeview(right, columns=cols, show="headings", height=10)
@@ -356,6 +353,7 @@ class SmokeSyncGUI(tk.Tk):
 
         self.pixels_per_sec = 4.0
         self.timeline_row_h = 26
+        self.timeline_ruler_h = 22
         canvas_area = ttk.Frame(timeline_frame)
         canvas_area.pack(fill="both", expand=True, pady=(4, 0))
 
@@ -599,16 +597,6 @@ class SmokeSyncGUI(tk.Tk):
                 self.unbind_all("<KeyPress>")
             self.log("Captura en vivo desactivada.")
 
-    def _refresh_capture_legend(self):
-        if not self.shortcut_map:
-            self.lbl_capture_legend.config(text="(sin atajos configurados - agrega uno en Dispositivos)")
-            return
-        parts = []
-        for key, (dev_name, mode, extra) in sorted(self.shortcut_map.items()):
-            label = f"{dev_name}:{extra}" if mode == "state" else dev_name
-            parts.append(f"{key}={label}")
-        self.lbl_capture_legend.config(text="  ".join(parts))
-
     def _update_capture_pos_label(self):
         if self.last_pos is None:
             self.lbl_capture_pos.config(text="Posicion: -")
@@ -682,6 +670,13 @@ class SmokeSyncGUI(tk.Tk):
         frac = max(0.0, min(1.0, (x - 100) / total_w))
         self.timeline_canvas.xview_moveto(frac)
 
+    def _nice_tick_interval(self):
+        target_px = 80
+        for interval in (1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600):
+            if interval * self.pixels_per_sec >= target_px:
+                return interval
+        return 3600
+
     def _refresh_timeline(self):
         if not hasattr(self, "timeline_canvas"):
             return
@@ -690,20 +685,23 @@ class SmokeSyncGUI(tk.Tk):
 
         devices = self.cfg.get("devices", [])
         row_h = self.timeline_row_h
+        ruler_h = self.timeline_ruler_h
         device_index = {d["name"]: i for i, d in enumerate(devices)}
-        height = max(row_h * max(len(devices), 1), 60)
+        height = ruler_h + max(row_h * max(len(devices), 1), 60)
         self.timeline_labels.configure(height=height)
         self.timeline_canvas.configure(height=height)
 
+        self.timeline_labels.create_rectangle(0, 0, 100, ruler_h, fill="#141416", outline="")
         label_bg = ["#2a2a2e", "#333338"]
         for i, d in enumerate(devices):
-            y = i * row_h
+            y = ruler_h + i * row_h
             swatch_color = self._device_color(d["name"], device_index, "burst", "")
+            suffix = f" ({d['shortcut']})" if d.get("kind") != "multi_state" and d.get("shortcut") else ""
             self.timeline_labels.create_rectangle(0, y, 100, y + row_h,
                                                    fill=label_bg[i % 2], outline="")
             self.timeline_labels.create_rectangle(4, y + 5, 12, y + row_h - 5,
                                                    fill=swatch_color, outline="")
-            self.timeline_labels.create_text(18, y + row_h / 2, anchor="w", text=d["name"],
+            self.timeline_labels.create_text(18, y + row_h / 2, anchor="w", text=d["name"] + suffix,
                                               fill="#ffffff", font=("", 9, "bold"))
 
         items = list(self.tree_cues.get_children())
@@ -725,7 +723,7 @@ class SmokeSyncGUI(tk.Tk):
         # Lineas de fondo por fila (para leer mejor a que dispositivo pertenece)
         row_bg = ["#1e1e22", "#26262a"]
         for i in range(len(devices)):
-            y = i * row_h
+            y = ruler_h + i * row_h
             self.timeline_canvas.create_rectangle(0, y, total_w, y + row_h,
                                                     fill=row_bg[i % 2], outline="")
 
@@ -736,11 +734,12 @@ class SmokeSyncGUI(tk.Tk):
         for iid, t_s, device, modo, valor in parsed:
             by_device.setdefault(device, []).append((iid, t_s, modo, valor))
 
+        self._cue_geom = {}
         for iid, t_s, device, modo, valor in parsed:
             row = device_index.get(device)
             if row is None:
                 continue
-            y0 = row * row_h + 2
+            y0 = ruler_h + row * row_h + 2
             y1 = y0 + row_h - 4
             x0 = t_s * self.pixels_per_sec
             if modo == "burst":
@@ -756,20 +755,67 @@ class SmokeSyncGUI(tk.Tk):
                 x1 = x0 + 6
                 label = ""
             color = self._device_color(device, device_index, modo, valor)
-            outline = "#ffee58" if iid == selected_iid else "#000000"
+            outline = "#4fd1ff" if iid == selected_iid else "#000000"
             outline_w = 2 if iid == selected_iid else 1
-            self.timeline_canvas.create_rectangle(x0, y0, max(x1, x0 + 4), y1,
-                                                   fill=color, outline=outline, width=outline_w,
-                                                   tags=("cue", f"iid_{iid}"))
+            rect_id = self.timeline_canvas.create_rectangle(
+                x0, y0, max(x1, x0 + 4), y1, fill=color, outline=outline, width=outline_w,
+                tags=("cue", f"iid_{iid}"))
+            text_id = None
             if label and x1 - x0 > 20:
-                self.timeline_canvas.create_text((x0 + x1) / 2, (y0 + y1) / 2, text=label,
-                                                  font=("", 7, "bold"), fill=self._text_color_for(color),
-                                                  tags=("cue", f"iid_{iid}"))
+                text_id = self.timeline_canvas.create_text(
+                    (x0 + x1) / 2, (y0 + y1) / 2, text=label, font=("", 7, "bold"),
+                    fill=self._text_color_for(color), tags=("cue", f"iid_{iid}"))
+            self._cue_geom[iid] = {"x0": x0, "x1": x1, "y0": y0, "y1": y1, "modo": modo,
+                                    "device": device, "t_s": t_s, "rect_id": rect_id, "text_id": text_id}
 
-        if self.last_pos is not None:
-            x = self.last_pos * self.pixels_per_sec
-            self.timeline_canvas.create_line(x, 0, x, height, fill="#ffee58", width=2, tags=("playhead",))
-            self.timeline_canvas.create_polygon(x - 5, 0, x + 5, 0, x, 8, fill="#ffee58", tags=("playhead",))
+        # Marcador de seleccion: donde quedo asignada la accion seleccionada
+        if selected_iid and selected_iid in self._cue_geom:
+            g = self._cue_geom[selected_iid]
+            self.timeline_canvas.create_line(g["x0"], 0, g["x0"], height, fill="#4fd1ff",
+                                              width=1, dash=(4, 2), tags=("selection_marker",))
+            if g["modo"] == "burst" and g["x1"] > g["x0"] + 1:
+                self.timeline_canvas.create_line(g["x1"], 0, g["x1"], height, fill="#4fd1ff",
+                                                  width=1, dash=(4, 2), tags=("selection_marker",))
+
+        self._draw_ruler(total_w, height)
+        self._draw_playhead(height)
+
+    def _draw_ruler(self, total_w, height):
+        ruler_h = self.timeline_ruler_h
+        self.timeline_canvas.create_rectangle(0, 0, total_w, ruler_h, fill="#141416", outline="")
+        self.timeline_canvas.create_line(0, ruler_h, total_w, ruler_h, fill="#555555")
+        interval = self._nice_tick_interval()
+        t = 0
+        while t * self.pixels_per_sec <= total_w:
+            x = t * self.pixels_per_sec
+            self.timeline_canvas.create_line(x, ruler_h - 6, x, ruler_h, fill="#999999", tags=("ruler",))
+            self.timeline_canvas.create_text(x + 3, ruler_h - 14, anchor="w", text=core.fmt_time(t),
+                                              fill="#cccccc", font=("", 7), tags=("ruler",))
+            t += interval
+
+    def _draw_playhead(self, height=None):
+        self.timeline_canvas.delete("playhead")
+        if self.last_pos is None:
+            return
+        if height is None:
+            height = int(self.timeline_canvas.cget("height"))
+        x = self.last_pos * self.pixels_per_sec
+        self.timeline_canvas.create_line(x, 0, x, height, fill="#ffee58", width=2, tags=("playhead",))
+        self.timeline_canvas.create_polygon(x - 5, 0, x + 5, 0, x, 8, fill="#ffee58", tags=("playhead",))
+
+    def _timeline_tooltip(self, x, y, text):
+        self.timeline_canvas.delete("tooltip")
+        pad = 4
+        text_id = self.timeline_canvas.create_text(x + 10, y - 10, anchor="w", text=text,
+                                                     fill="#000000", font=("", 8, "bold"), tags=("tooltip",))
+        bbox = self.timeline_canvas.bbox(text_id)
+        if bbox:
+            rect_id = self.timeline_canvas.create_rectangle(
+                bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad,
+                fill="#ffee58", outline="#000000", tags=("tooltip",))
+            self.timeline_canvas.tag_raise(text_id, rect_id)
+
+    EDGE_PX = 6
 
     def _find_timeline_iid(self, event):
         x = self.timeline_canvas.canvasx(event.x)
@@ -782,36 +828,81 @@ class SmokeSyncGUI(tk.Tk):
 
     def _on_timeline_press(self, event):
         iid = self._find_timeline_iid(event)
-        if iid:
-            self.tree_cues.selection_set(iid)
-            self.tree_cues.see(iid)
-            t, device, modo, valor = self.tree_cues.item(iid, "values")
-            x = self.timeline_canvas.canvasx(event.x)
-            self._timeline_drag = {"iid": iid, "start_x": x, "press_x": x,
-                                    "orig_t": core.parse_time(t), "moved": False}
-            self._refresh_timeline()
-        else:
+        if not iid:
             self._timeline_drag = None
+            return
+        self.tree_cues.selection_set(iid)
+        self.tree_cues.see(iid)
+        geom = self._cue_geom.get(iid, {})
+        t, device, modo, valor = self.tree_cues.item(iid, "values")
+        x = self.timeline_canvas.canvasx(event.x)
+
+        drag_mode = "move"
+        if modo == "burst" and geom:
+            if abs(x - geom["x0"]) <= self.EDGE_PX:
+                drag_mode = "resize-left"
+            elif abs(x - geom["x1"]) <= self.EDGE_PX:
+                drag_mode = "resize-right"
+
+        dur = float(str(valor).rstrip("s")) if modo == "burst" else 0.0
+        self._timeline_drag = {
+            "iid": iid, "mode": drag_mode, "start_x": x, "press_x": x, "moved": False,
+            "orig_t": core.parse_time(t), "orig_dur": dur,
+        }
+        cursor = "sb_h_double_arrow" if drag_mode != "move" else "fleur"
+        self.timeline_canvas.configure(cursor=cursor)
+        self._refresh_timeline()
 
     def _on_timeline_drag(self, event):
-        if not self._timeline_drag:
+        d = self._timeline_drag
+        if not d:
             return
         x = self.timeline_canvas.canvasx(event.x)
-        dx = x - self._timeline_drag["start_x"]
-        if abs(x - self._timeline_drag["press_x"]) > 3:
-            self._timeline_drag["moved"] = True
-        self.timeline_canvas.move(f"iid_{self._timeline_drag['iid']}", dx, 0)
-        self._timeline_drag["start_x"] = x
-        self._timeline_drag["orig_t"] = max(0.0, self._timeline_drag["orig_t"] + dx / self.pixels_per_sec)
+        dx = x - d["start_x"]
+        if abs(x - d["press_x"]) > 3:
+            d["moved"] = True
+        d["start_x"] = x
+        dt = dx / self.pixels_per_sec
+
+        geom = self._cue_geom.get(d["iid"])
+        if d["mode"] == "move":
+            self.timeline_canvas.move(f"iid_{d['iid']}", dx, 0)
+            d["orig_t"] = max(0.0, d["orig_t"] + dt)
+            hint = core.fmt_time_ms(d["orig_t"])
+            if d["orig_dur"]:
+                hint += f"  ->  {core.fmt_time_ms(d['orig_t'] + d['orig_dur'])}"
+        elif d["mode"] == "resize-right":
+            d["orig_dur"] = max(0.2, d["orig_dur"] + dt)
+            new_x1 = geom["x0"] + d["orig_dur"] * self.pixels_per_sec
+            self.timeline_canvas.coords(geom["rect_id"], geom["x0"], geom["y0"], new_x1, geom["y1"])
+            if geom["text_id"]:
+                self.timeline_canvas.coords(geom["text_id"], (geom["x0"] + new_x1) / 2, (geom["y0"] + geom["y1"]) / 2)
+            hint = f"{core.fmt_time_ms(d['orig_t'])}  ->  {core.fmt_time_ms(d['orig_t'] + d['orig_dur'])}"
+        else:  # resize-left
+            new_t = max(0.0, d["orig_t"] + dt)
+            new_dur = max(0.2, d["orig_dur"] - dt)
+            d["orig_t"], d["orig_dur"] = new_t, new_dur
+            new_x0 = new_t * self.pixels_per_sec
+            self.timeline_canvas.coords(geom["rect_id"], new_x0, geom["y0"], geom["x1"], geom["y1"])
+            if geom["text_id"]:
+                self.timeline_canvas.coords(geom["text_id"], (new_x0 + geom["x1"]) / 2, (geom["y0"] + geom["y1"]) / 2)
+            hint = f"{core.fmt_time_ms(new_t)}  ->  {core.fmt_time_ms(new_t + new_dur)}"
+
+        self._timeline_tooltip(x, geom["y0"] if geom else event.y, hint)
 
     def _on_timeline_release(self, event):
-        if not self._timeline_drag:
+        d = self._timeline_drag
+        if not d:
             return
-        iid = self._timeline_drag["iid"]
-        if self._timeline_drag["moved"]:
-            new_t = max(0.0, self._timeline_drag["orig_t"])
+        self.timeline_canvas.configure(cursor="")
+        self.timeline_canvas.delete("tooltip")
+        iid = d["iid"]
+        if d["moved"]:
             vals = list(self.tree_cues.item(iid, "values"))
+            new_t = max(0.0, d["orig_t"])
             vals[0] = core.fmt_time_ms(new_t)
+            if d["mode"] != "move":
+                vals[3] = f"{round(d['orig_dur'], 2)}s"
             self.tree_cues.item(iid, values=vals)
             self._load_cues_into_tree(self._tree_cues_to_list())
             new_iid = self._iid_for_time_device(vals[0], vals[1])
@@ -965,6 +1056,8 @@ class SmokeSyncGUI(tk.Tk):
                 self.last_pos = pos
                 if hasattr(self, "lbl_capture_pos"):
                     self._update_capture_pos_label()
+                if hasattr(self, "timeline_canvas") and not self._timeline_drag:
+                    self._draw_playhead()
         except queue.Empty:
             pass
         self.after(500, self._poll_state_queue)
@@ -1046,8 +1139,8 @@ class SmokeSyncGUI(tk.Tk):
                     mode = "scene" if d.get("kind") == "scene" else "burst"
                     mapping[key] = (d["name"], mode, None)
         self.shortcut_map = mapping
-        if hasattr(self, "lbl_capture_legend"):
-            self._refresh_capture_legend()
+        if hasattr(self, "timeline_canvas"):
+            self._refresh_timeline()
 
     def _on_device_select(self, _event):
         sel = self.tree_devices.selection()

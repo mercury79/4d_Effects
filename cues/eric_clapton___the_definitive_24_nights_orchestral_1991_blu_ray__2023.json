@@ -1,0 +1,30 @@
+{
+  "match": "Eric Clapton - The Definitive 24 Nights Orchestral 1991 Blu-ray (2023)",
+  "lead_time_s": 4.0,
+  "cues": [
+    {
+      "t": "1:15:10.756",
+      "device": "Energia"
+    },
+    {
+      "t": "1:15:17.346",
+      "device": "Estrella dorada"
+    },
+    {
+      "t": "1:15:23.977",
+      "device": "Energia"
+    },
+    {
+      "t": "1:15:34.738",
+      "device": "Estrella dorada"
+    },
+    {
+      "t": "1:15:38.535",
+      "device": "Energia"
+    },
+    {
+      "t": "1:15:42.580",
+      "device": "Estrella dorada"
+    }
+  ]
+}
