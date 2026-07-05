@@ -168,6 +168,34 @@ class SmokeSyncGUI(tk.Tk):
         ttk.Label(self.frame_dev_shortcut, text="Atajo de teclado (1 caracter, para captura en vivo / Stream Deck)").pack(anchor="w")
         ttk.Entry(self.frame_dev_shortcut, textvariable=self.var_dev_shortcut, width=4).pack(anchor="w")
 
+        # -- Avanzado: para dispositivos que no son una entidad HA nativa de
+        # on/off, sino un script/servicio generico (ej remote.send_command de
+        # un Broadlink, con 'device'/'command' propios en el payload).
+        self.var_dev_advanced = tk.BooleanVar(value=False)
+        self.frame_dev_advanced_toggle = ttk.Frame(right)
+        self.frame_dev_advanced_toggle.pack(fill="x", pady=(0, 4))
+        ttk.Checkbutton(self.frame_dev_advanced_toggle,
+                        text="Avanzado (servicio/datos JSON personalizados, ej. Broadlink/scripts)",
+                        variable=self.var_dev_advanced, command=self._on_dev_advanced_toggle).pack(anchor="w")
+
+        self.frame_dev_advanced = ttk.LabelFrame(right, text="ON / OFF personalizados", padding=6)
+        self.var_dev_on_service = tk.StringVar()
+        self.var_dev_on_data = tk.StringVar(value="{}")
+        self.var_dev_off_service = tk.StringVar()
+        self.var_dev_off_data = tk.StringVar(value="{}")
+        ttk.Label(self.frame_dev_advanced, text="Servicio ON (domain/service)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(self.frame_dev_advanced, textvariable=self.var_dev_on_service, width=22).grid(row=0, column=1, sticky="w", padx=4)
+        ttk.Label(self.frame_dev_advanced, text="Datos ON (JSON)").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(self.frame_dev_advanced, textvariable=self.var_dev_on_data, width=30).grid(row=1, column=1, sticky="w", padx=4, pady=(4, 0))
+        ttk.Label(self.frame_dev_advanced, text="Servicio OFF (domain/service)").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(self.frame_dev_advanced, textvariable=self.var_dev_off_service, width=22).grid(row=2, column=1, sticky="w", padx=4, pady=(6, 0))
+        ttk.Label(self.frame_dev_advanced, text="Datos OFF (JSON)").grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(self.frame_dev_advanced, textvariable=self.var_dev_off_data, width=30).grid(row=3, column=1, sticky="w", padx=4, pady=(4, 0))
+        ttk.Label(self.frame_dev_advanced,
+                  text="Ej: servicio 'remote/send_command', datos\n"
+                       '{"entity_id":"remote.broadlink","device":"maquina_humo","command":"humo_abierto"}',
+                  foreground="#666", font=("", 8), wraplength=260).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
         ttk.Label(right, text="Tipo de dispositivo").pack(anchor="w")
         kind_frame = ttk.Frame(right)
         kind_frame.pack(fill="x", pady=(0, 4))
@@ -238,12 +266,27 @@ class SmokeSyncGUI(tk.Tk):
             self._on_dev_kind_change()
 
     def _on_dev_kind_change(self):
-        if self.var_dev_kind.get() == "multi_state":
+        kind = self.var_dev_kind.get()
+        if kind == "multi_state":
             self.frame_states.pack(fill="x", pady=(0, 8))
             self.frame_dev_shortcut.pack_forget()
+            self.frame_dev_advanced_toggle.pack_forget()
+            self.frame_dev_advanced.pack_forget()
         else:
             self.frame_states.pack_forget()
             self.frame_dev_shortcut.pack(fill="x", pady=(0, 8))
+            if kind == "binary":
+                self.frame_dev_advanced_toggle.pack(fill="x", pady=(0, 4))
+                self._on_dev_advanced_toggle()
+            else:
+                self.frame_dev_advanced_toggle.pack_forget()
+                self.frame_dev_advanced.pack_forget()
+
+    def _on_dev_advanced_toggle(self):
+        if self.var_dev_advanced.get():
+            self.frame_dev_advanced.pack(fill="x", pady=(0, 8))
+        else:
+            self.frame_dev_advanced.pack_forget()
 
     def _add_state_row(self):
         name = self.var_state_name.get().strip().upper()
@@ -332,7 +375,7 @@ class SmokeSyncGUI(tk.Tk):
         self.lbl_capture_pos.pack(side="left", padx=10)
 
         cols = ("t", "device", "modo", "valor")
-        self.tree_cues = ttk.Treeview(right, columns=cols, show="headings", height=10)
+        self.tree_cues = ttk.Treeview(right, columns=cols, show="headings", height=10, selectmode="extended")
         headers = {"t": "Timestamp", "device": "Dispositivo", "modo": "Modo", "valor": "Duracion / Estado"}
         for c, w in zip(cols, (110, 110, 90, 130)):
             self.tree_cues.heading(c, text=headers[c])
@@ -559,10 +602,26 @@ class SmokeSyncGUI(tk.Tk):
             self.var_cue_duration.set(str(valor).rstrip("s"))
 
     def _delete_cue(self):
-        sel = self.tree_cues.selection()
-        if sel:
-            self.tree_cues.delete(sel[0])
-            self._refresh_timeline()
+        sel = list(self.tree_cues.selection())
+        if not sel:
+            return
+        order = list(self.tree_cues.get_children())
+        sel_idx = [order.index(i) for i in sel if i in order]
+        if not sel_idx:
+            return
+        max_idx = max(sel_idx)
+        # Auto-seleccionar el siguiente cue tras el ultimo eliminado; si no
+        # hay siguiente, el anterior a la seleccion.
+        next_iid = next((i for i in order[max_idx + 1:] if i not in sel), None)
+        if next_iid is None:
+            before = [i for i in order[:max_idx] if i not in sel]
+            next_iid = before[-1] if before else None
+        for iid in sel:
+            self.tree_cues.delete(iid)
+        if next_iid and self.tree_cues.exists(next_iid):
+            self.tree_cues.selection_set(next_iid)
+            self._load_cue_into_form(next_iid)
+        self._refresh_timeline()
 
     def _on_delete_key(self, event):
         # No interferir con Backspace/Supr mientras se edita texto en un
@@ -759,7 +818,7 @@ class SmokeSyncGUI(tk.Tk):
             self.timeline_canvas.create_rectangle(0, y, total_w, y + row_h,
                                                     fill=row_bg[i % 2], outline="")
 
-        selected_iid = self.tree_cues.selection()[0] if self.tree_cues.selection() else None
+        selected_iids = set(self.tree_cues.selection())
 
         parsed.sort(key=lambda p: p[1])
         by_device = {}
@@ -787,8 +846,8 @@ class SmokeSyncGUI(tk.Tk):
                 x1 = x0 + 6
                 label = ""
             color = self._device_color(device, device_index, modo, valor)
-            outline = "#4fd1ff" if iid == selected_iid else "#000000"
-            outline_w = 2 if iid == selected_iid else 1
+            outline = "#4fd1ff" if iid in selected_iids else "#000000"
+            outline_w = 2 if iid in selected_iids else 1
             rect_id = self.timeline_canvas.create_rectangle(
                 x0, y0, max(x1, x0 + 4), y1, fill=color, outline=outline, width=outline_w,
                 tags=("cue", f"iid_{iid}"))
@@ -800,9 +859,11 @@ class SmokeSyncGUI(tk.Tk):
             self._cue_geom[iid] = {"x0": x0, "x1": x1, "y0": y0, "y1": y1, "modo": modo,
                                     "device": device, "t_s": t_s, "rect_id": rect_id, "text_id": text_id}
 
-        # Marcador de seleccion: donde quedo asignada la accion seleccionada
-        if selected_iid and selected_iid in self._cue_geom:
-            g = self._cue_geom[selected_iid]
+        # Marcador de seleccion: donde quedo asignada cada accion seleccionada
+        for sel_iid in selected_iids:
+            g = self._cue_geom.get(sel_iid)
+            if not g:
+                continue
             self.timeline_canvas.create_line(g["x0"], 0, g["x0"], height, fill="#4fd1ff",
                                               width=1, dash=(4, 2), tags=("selection_marker",))
             if g["modo"] == "burst" and g["x1"] > g["x0"] + 1:
@@ -858,31 +919,57 @@ class SmokeSyncGUI(tk.Tk):
                     return tag[4:]
         return None
 
+    # Bits de event.state para modificadores (Tk): Shift=0x0001,
+    # Control=0x0004, Command/Mod1 en macOS suele llegar como 0x0008.
+    SHIFT_MASK = 0x0001
+    CTRL_MASK = 0x0004 | 0x0008
+
     def _on_timeline_press(self, event):
         iid = self._find_timeline_iid(event)
+        shift = bool(event.state & self.SHIFT_MASK)
+        ctrl = bool(event.state & self.CTRL_MASK)
+
         if not iid:
+            if not shift and not ctrl:
+                self.tree_cues.selection_set(())
+                self._refresh_timeline()
             self._timeline_drag = None
             return
-        self.tree_cues.selection_set(iid)
+
+        order = list(self.tree_cues.get_children())
+        last_click = getattr(self, "_last_timeline_click_iid", None)
+
+        if shift and last_click in order:
+            i0, i1 = order.index(last_click), order.index(iid)
+            lo, hi = sorted((i0, i1))
+            self.tree_cues.selection_set(order[lo:hi + 1])
+            self._timeline_drag = None
+        elif ctrl:
+            current = set(self.tree_cues.selection())
+            current.symmetric_difference_update({iid})
+            self.tree_cues.selection_set(tuple(current))
+            self._timeline_drag = None
+        else:
+            self.tree_cues.selection_set(iid)
+            geom = self._cue_geom.get(iid, {})
+            t, device, modo, valor = self.tree_cues.item(iid, "values")
+            x = self.timeline_canvas.canvasx(event.x)
+            drag_mode = "move"
+            if modo == "burst" and geom:
+                if abs(x - geom["x0"]) <= self.EDGE_PX:
+                    drag_mode = "resize-left"
+                elif abs(x - geom["x1"]) <= self.EDGE_PX:
+                    drag_mode = "resize-right"
+            dur = float(str(valor).rstrip("s")) if modo == "burst" else 0.0
+            self._timeline_drag = {
+                "iid": iid, "mode": drag_mode, "start_x": x, "press_x": x, "moved": False,
+                "orig_t": core.parse_time(t), "orig_dur": dur,
+            }
+            cursor = "sb_h_double_arrow" if drag_mode != "move" else "fleur"
+            self.timeline_canvas.configure(cursor=cursor)
+
+        self._last_timeline_click_iid = iid
         self.tree_cues.see(iid)
-        geom = self._cue_geom.get(iid, {})
-        t, device, modo, valor = self.tree_cues.item(iid, "values")
-        x = self.timeline_canvas.canvasx(event.x)
-
-        drag_mode = "move"
-        if modo == "burst" and geom:
-            if abs(x - geom["x0"]) <= self.EDGE_PX:
-                drag_mode = "resize-left"
-            elif abs(x - geom["x1"]) <= self.EDGE_PX:
-                drag_mode = "resize-right"
-
-        dur = float(str(valor).rstrip("s")) if modo == "burst" else 0.0
-        self._timeline_drag = {
-            "iid": iid, "mode": drag_mode, "start_x": x, "press_x": x, "moved": False,
-            "orig_t": core.parse_time(t), "orig_dur": dur,
-        }
-        cursor = "sb_h_double_arrow" if drag_mode != "move" else "fleur"
-        self.timeline_canvas.configure(cursor=cursor)
         self._refresh_timeline()
 
     def _on_timeline_drag(self, event):
@@ -955,9 +1042,7 @@ class SmokeSyncGUI(tk.Tk):
         return None
 
     def _on_cue_tree_select(self, _event):
-        sel = self.tree_cues.selection()
-        if sel:
-            self._refresh_timeline()
+        self._refresh_timeline()
 
     def _save_sheet(self):
         fname = self.var_sheet_filename.get().strip()
@@ -1197,6 +1282,15 @@ class SmokeSyncGUI(tk.Tk):
                 self.tree_states.insert("", "end", iid=name,
                                          values=(name, s["service"], json.dumps(s.get("data", {})),
                                                  s.get("shortcut", "")))
+        if device.get("kind") == "binary":
+            simple_data = {"entity_id": device.get("entity_id")}
+            is_advanced = (device.get("on_data") not in (None, simple_data)
+                           or device.get("off_data") not in (None, simple_data))
+            self.var_dev_advanced.set(is_advanced)
+            self.var_dev_on_service.set(device.get("on_service", ""))
+            self.var_dev_off_service.set(device.get("off_service", ""))
+            self.var_dev_on_data.set(json.dumps(device.get("on_data") or simple_data))
+            self.var_dev_off_data.set(json.dumps(device.get("off_data") or simple_data))
         self._on_dev_kind_change()
         self._refresh_test_state_options(device)
 
@@ -1222,10 +1316,27 @@ class SmokeSyncGUI(tk.Tk):
         elif kind == "scene":
             device = {"name": name, "kind": "scene", "entity_id": entity,
                       "activate_service": "scene/turn_on", "shortcut": shortcut}
+        elif kind == "binary" and self.var_dev_advanced.get():
+            try:
+                on_data = json.loads(self.var_dev_on_data.get().strip() or "{}")
+                off_data = json.loads(self.var_dev_off_data.get().strip() or "{}")
+            except Exception as e:
+                messagebox.showwarning("JSON invalido", f"Datos ON/OFF invalidos: {e}")
+                return
+            on_srv = self.var_dev_on_service.get().strip()
+            off_srv = self.var_dev_off_service.get().strip()
+            if not on_srv or not off_srv:
+                messagebox.showwarning("Falta informacion", "Servicio ON y OFF son requeridos en modo avanzado.")
+                return
+            device = {"name": name, "kind": "binary", "entity_id": entity,
+                      "on_service": on_srv, "off_service": off_srv,
+                      "on_data": on_data, "off_data": off_data, "shortcut": shortcut}
         else:
             on_srv, off_srv = core.services_for_entity(entity)
             device = {"name": name, "kind": "binary", "entity_id": entity,
-                      "on_service": on_srv, "off_service": off_srv, "shortcut": shortcut}
+                      "on_service": on_srv, "off_service": off_srv,
+                      "on_data": {"entity_id": entity}, "off_data": {"entity_id": entity},
+                      "shortcut": shortcut}
 
         original_name = getattr(self, "_editing_original_name", None)
         devices = [d for d in self.cfg.get("devices", [])
@@ -1239,6 +1350,8 @@ class SmokeSyncGUI(tk.Tk):
         self.var_dev_name.set("")
         self.var_dev_entity.set("")
         self.var_dev_shortcut.set("")
+        self.var_dev_advanced.set(False)
+        self._on_dev_advanced_toggle()
         self.tree_states.delete(*self.tree_states.get_children())
         self.log(f"Dispositivo '{name}' guardado ({entity}).")
 

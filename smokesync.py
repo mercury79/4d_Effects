@@ -138,10 +138,12 @@ def cmd_test_fire(args):
         print(f"Dispositivo '{name}' no encontrado. Disponibles: {[d['name'] for d in devices]}")
         sys.exit(1)
     dur = cfg.get("default_duration_s", 3)
-    print(f"Disparando '{device['name']}' ({device['entity_id']}) por {dur}s...")
-    core.ha_call(cfg, device["on_service"], device["entity_id"])
+    print(f"Disparando '{device['name']}' ({device.get('entity_id', '')}) por {dur}s...")
+    on_data = device.get("on_data") or {"entity_id": device.get("entity_id")}
+    off_data = device.get("off_data") or {"entity_id": device.get("entity_id")}
+    core.ha_call_service(cfg, device["on_service"], on_data)
     time.sleep(dur)
-    core.ha_call(cfg, device["off_service"], device["entity_id"])
+    core.ha_call_service(cfg, device["off_service"], off_data)
     print("Hecho.")
 
 

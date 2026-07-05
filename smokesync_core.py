@@ -97,6 +97,13 @@ def migrate_config(cfg):
     merged.pop("off_service", None)
     for d in merged.get("devices", []):
         d.setdefault("kind", "binary")
+        if d["kind"] == "binary":
+            # 'on_data'/'off_data' son el payload completo que se manda a HA
+            # (entity_id + cualquier dato extra). Si el dispositivo viene del
+            # formato viejo (solo entity_id + servicios), se completa con el
+            # payload simple {"entity_id": ...} para no romper compatibilidad.
+            d.setdefault("on_data", {"entity_id": d.get("entity_id")})
+            d.setdefault("off_data", {"entity_id": d.get("entity_id")})
     return merged
 
 
@@ -239,11 +246,17 @@ def set_device_state_async(cfg, device, state_name, log=print, on_done=None):
 
 def fire_device_async(cfg, device, duration, log=print, on_done=None):
     """Para dispositivos binary: enciende, espera 'duration' y apaga.
+    on_data/off_data son el payload completo (entity_id + cualquier dato
+    extra), lo que permite dispositivos que no son una entidad HA nativa
+    sino un script/servicio generico (ej remote.send_command de un
+    Broadlink con 'device'/'command' en el payload).
     on_done(ok, detail) reporta el resultado combinado."""
     def _run():
-        ok1 = ha_call(cfg, device["on_service"], device["entity_id"], log)
+        on_data = device.get("on_data") or {"entity_id": device.get("entity_id")}
+        off_data = device.get("off_data") or {"entity_id": device.get("entity_id")}
+        ok1 = ha_call_service(cfg, device["on_service"], on_data, log)
         time.sleep(duration)
-        ok2 = ha_call(cfg, device["off_service"], device["entity_id"], log)
+        ok2 = ha_call_service(cfg, device["off_service"], off_data, log)
         ok = ok1 and ok2
         detail = f"burst {duration}s" if ok else "fallo burst"
         if on_done:
