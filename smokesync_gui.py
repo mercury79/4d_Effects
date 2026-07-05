@@ -64,6 +64,7 @@ class SmokeSyncGUI(tk.Tk):
         self.last_pos = None
         self.last_title = None
         self.capture_on = False
+        self._capture_held = {}
         self._monitor_stop = threading.Event()
 
         self._build_ui()
@@ -590,11 +591,15 @@ class SmokeSyncGUI(tk.Tk):
     def _toggle_capture(self):
         self.capture_on = self.var_capture_on.get()
         if self.capture_on:
-            self._capture_bind_id = self.bind_all("<KeyPress>", self._on_capture_key)
-            self.log("Captura en vivo activada.")
+            self.bind_all("<KeyPress>", self._on_capture_keypress)
+            self.bind_all("<KeyRelease>", self._on_capture_keyrelease)
+            self._capture_held = {}
+            self.log("Captura en vivo activada. Rafagas: toque corto = duracion por "
+                     "defecto, mantener presionada = duracion exacta sostenida.")
         else:
-            if getattr(self, "_capture_bind_id", None):
-                self.unbind_all("<KeyPress>")
+            self.unbind_all("<KeyPress>")
+            self.unbind_all("<KeyRelease>")
+            self._capture_held = {}
             self.log("Captura en vivo desactivada.")
 
     def _update_capture_pos_label(self):
@@ -603,11 +608,12 @@ class SmokeSyncGUI(tk.Tk):
         else:
             self.lbl_capture_pos.config(text=f"Posicion: {core.fmt_time_ms(self.last_pos)}")
 
-    def _on_capture_key(self, event):
-        if not self.capture_on:
-            return
-        # No capturar mientras el usuario esta escribiendo en un campo de texto.
-        if isinstance(event.widget, (tk.Entry, ttk.Entry, tk.Text, ttk.Combobox)):
+    @staticmethod
+    def _is_text_entry(widget):
+        return isinstance(widget, (tk.Entry, ttk.Entry, tk.Text, ttk.Combobox))
+
+    def _on_capture_keypress(self, event):
+        if not self.capture_on or self._is_text_entry(event.widget):
             return
         key = (event.char or event.keysym).strip().upper()
         match = self.shortcut_map.get(key)
@@ -617,20 +623,46 @@ class SmokeSyncGUI(tk.Tk):
             self.log("[captura] sin posicion del Zidoo todavia (¿esta reproduciendo?).")
             return
         device_name, mode, extra = match
-        t = core.fmt_time_ms(self.last_pos)
+
+        if mode != "burst":
+            # Estado/escena: instantaneo, no tiene duracion que sostener.
+            t = core.fmt_time_ms(self.last_pos)
+            cues = self._tree_cues_to_list()
+            if mode == "state":
+                cues.append({"t": t, "device": device_name, "state": extra})
+                desc = f"estado {extra}"
+            else:
+                cues.append({"t": t, "device": device_name})
+                desc = "activar escena"
+            self._load_cues_into_tree(cues)
+            self.log(f"[captura] {t} -> {device_name} ({desc})")
+            return
+
+        # Rafaga: si la tecla ya esta sostenida (autorepeat del SO), ignorar;
+        # solo registramos el instante del primer KeyPress.
+        if key in self._capture_held:
+            return
+        self._capture_held[key] = {"device": device_name, "press_pos": self.last_pos}
+
+    def _on_capture_keyrelease(self, event):
+        if not self.capture_on or self._is_text_entry(event.widget):
+            return
+        key = (event.char or event.keysym).strip().upper()
+        held = self._capture_held.pop(key, None)
+        if not held or self.last_pos is None:
+            return
+        press_pos = held["press_pos"]
+        device_name = held["device"]
+        held_dur = self.last_pos - press_pos
+        # Toque corto (menos de ~0.3s de reproduccion sostenida): usar la
+        # duracion por defecto en vez de un valor casi cero.
+        dur = held_dur if held_dur >= 0.3 else self.cfg.get("default_duration_s", 3)
+        t = core.fmt_time_ms(press_pos)
         cues = self._tree_cues_to_list()
-        if mode == "state":
-            cues.append({"t": t, "device": device_name, "state": extra})
-            desc = f"estado {extra}"
-        elif mode == "scene":
-            cues.append({"t": t, "device": device_name})
-            desc = "activar escena"
-        else:
-            dur = self.cfg.get("default_duration_s", 3)
-            cues.append({"t": t, "device": device_name, "duration_s": dur})
-            desc = f"rafaga {dur}s"
+        cues.append({"t": t, "device": device_name, "duration_s": round(dur, 2)})
         self._load_cues_into_tree(cues)
-        self.log(f"[captura] {t} -> {device_name} ({desc})")
+        origen = "sostenida" if held_dur >= 0.3 else "toque corto, duracion por defecto"
+        self.log(f"[captura] {t} -> {device_name} (rafaga {round(dur, 2)}s, {origen})")
 
     # ---- Timeline visual ---------------------------------------------------
     def _device_color(self, device_name, device_index, modo, valor):
