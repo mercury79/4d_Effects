@@ -1,0 +1,12 @@
+{
+  "match": "Roger Waters",
+  "lead_time_s": 4,
+  "cues": [
+    { "t": "00:12:30", "device": "humo",   "duration_s": 3 },
+    { "t": "00:45:10", "device": "humo",   "duration_s": 2 },
+    { "t": "01:04:15", "device": "humo",   "duration_s": 40 },
+    { "t": "01:20:00", "device": "estrobo", "duration_s": 5 },
+    { "t": "01:30:00", "device": "agua",   "duration_s": 8 },
+    { "t": "01:58:00", "device": "humo",   "duration_s": 5 }
+  ]
+}
