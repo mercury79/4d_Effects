@@ -12,6 +12,7 @@ instalaciones) + `pip install requests`.
 Ejecutar:  python3 smokesync_gui.py
 """
 
+import colorsys
 import json
 import queue
 import sys
@@ -50,7 +51,7 @@ class SmokeSyncGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("SmokeSync - 4DX Control")
-        self.geometry("880x600")
+        self.geometry("1920x1080")
         self.minsize(760, 520)
 
         self.cfg = core.load_config() or dict(core.DEFAULT_CFG)
@@ -358,13 +359,13 @@ class SmokeSyncGUI(tk.Tk):
         canvas_area = ttk.Frame(timeline_frame)
         canvas_area.pack(fill="both", expand=True, pady=(4, 0))
 
-        self.timeline_labels = tk.Canvas(canvas_area, width=90, height=160, background="#f0f0f0",
+        self.timeline_labels = tk.Canvas(canvas_area, width=100, height=160, background="#2a2a2e",
                                           highlightthickness=0)
         self.timeline_labels.pack(side="left", fill="y")
 
         canvas_wrap = ttk.Frame(canvas_area)
         canvas_wrap.pack(side="left", fill="both", expand=True)
-        self.timeline_canvas = tk.Canvas(canvas_wrap, height=160, background="white", highlightthickness=0)
+        self.timeline_canvas = tk.Canvas(canvas_wrap, height=160, background="#1e1e22", highlightthickness=0)
         hscroll = ttk.Scrollbar(canvas_wrap, orient="horizontal", command=self.timeline_canvas.xview)
         self.timeline_canvas.configure(xscrollcommand=hscroll.set)
         self.timeline_canvas.pack(fill="both", expand=True, side="top")
@@ -543,9 +544,11 @@ class SmokeSyncGUI(tk.Tk):
 
     def _on_cue_double_click(self, _event):
         sel = self.tree_cues.selection()
-        if not sel:
-            return
-        t, device, modo, valor = self.tree_cues.item(sel[0], "values")
+        if sel:
+            self._load_cue_into_form(sel[0])
+
+    def _load_cue_into_form(self, iid):
+        t, device, modo, valor = self.tree_cues.item(iid, "values")
         self.var_cue_t.set(t)
         self.var_cue_device.set(device)
         self._on_cue_device_change()
@@ -642,18 +645,42 @@ class SmokeSyncGUI(tk.Tk):
         self.log(f"[captura] {t} -> {device_name} ({desc})")
 
     # ---- Timeline visual ---------------------------------------------------
-    def _timeline_color(self, modo, valor):
-        if modo == "burst":
-            return "#e08a3c"
-        if modo == "scene":
-            return "#8a5cd6"
-        # 'state': color estable por nombre de estado (mismo estado = mismo color)
-        palette = ["#4c9be8", "#4cbf7a", "#e0c93c", "#e05c5c", "#5ce0d8", "#c95ce0"]
-        return palette[hash(valor) % len(palette)]
+    def _device_color(self, device_name, device_index, modo, valor):
+        """Color estable por dispositivo (para identificarlo de un vistazo en
+        el timeline); los cues 'state' varian el brillo segun el estado para
+        distinguir velocidades/efectos dentro del mismo dispositivo."""
+        idx = device_index.get(device_name, 0)
+        hue = (idx * 0.61803398875) % 1.0  # angulo dorado: colores bien separados
+        if modo == "state":
+            v = 0.55 + 0.35 * ((hash(valor) % 100) / 100.0)
+        else:
+            v = 0.85
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.70, v)
+        return f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
+
+    @staticmethod
+    def _text_color_for(hex_color):
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+        return "#000000" if luminance > 0.55 else "#ffffff"
 
     def _zoom_timeline(self, factor):
         self.pixels_per_sec = max(0.5, min(40.0, self.pixels_per_sec * factor))
         self._refresh_timeline()
+        self._scroll_timeline_to_playhead()
+
+    def _scroll_timeline_to_playhead(self):
+        if self.last_pos is None:
+            return
+        bbox = self.timeline_canvas.bbox("all")
+        if not bbox or bbox[2] <= 0:
+            return
+        total_w = bbox[2]
+        x = self.last_pos * self.pixels_per_sec
+        frac = max(0.0, min(1.0, (x - 100) / total_w))
+        self.timeline_canvas.xview_moveto(frac)
 
     def _refresh_timeline(self):
         if not hasattr(self, "timeline_canvas"):
@@ -668,11 +695,16 @@ class SmokeSyncGUI(tk.Tk):
         self.timeline_labels.configure(height=height)
         self.timeline_canvas.configure(height=height)
 
+        label_bg = ["#2a2a2e", "#333338"]
         for i, d in enumerate(devices):
             y = i * row_h
-            self.timeline_labels.create_rectangle(0, y, 90, y + row_h,
-                                                   fill="#e8e8e8" if i % 2 else "#f0f0f0", outline="")
-            self.timeline_labels.create_text(6, y + row_h / 2, anchor="w", text=d["name"], font=("", 8))
+            swatch_color = self._device_color(d["name"], device_index, "burst", "")
+            self.timeline_labels.create_rectangle(0, y, 100, y + row_h,
+                                                   fill=label_bg[i % 2], outline="")
+            self.timeline_labels.create_rectangle(4, y + 5, 12, y + row_h - 5,
+                                                   fill=swatch_color, outline="")
+            self.timeline_labels.create_text(18, y + row_h / 2, anchor="w", text=d["name"],
+                                              fill="#ffffff", font=("", 9, "bold"))
 
         items = list(self.tree_cues.get_children())
         max_t = 60.0
@@ -691,10 +723,13 @@ class SmokeSyncGUI(tk.Tk):
         self.timeline_canvas.configure(scrollregion=(0, 0, total_w, height))
 
         # Lineas de fondo por fila (para leer mejor a que dispositivo pertenece)
+        row_bg = ["#1e1e22", "#26262a"]
         for i in range(len(devices)):
             y = i * row_h
             self.timeline_canvas.create_rectangle(0, y, total_w, y + row_h,
-                                                    fill="#f7f7f7" if i % 2 else "white", outline="")
+                                                    fill=row_bg[i % 2], outline="")
+
+        selected_iid = self.tree_cues.selection()[0] if self.tree_cues.selection() else None
 
         parsed.sort(key=lambda p: p[1])
         by_device = {}
@@ -720,17 +755,21 @@ class SmokeSyncGUI(tk.Tk):
             else:  # scene
                 x1 = x0 + 6
                 label = ""
-            color = self._timeline_color(modo, valor)
-            rect = self.timeline_canvas.create_rectangle(x0, y0, max(x1, x0 + 4), y1,
-                                                           fill=color, outline="#333",
-                                                           tags=("cue", f"iid_{iid}"))
+            color = self._device_color(device, device_index, modo, valor)
+            outline = "#ffee58" if iid == selected_iid else "#000000"
+            outline_w = 2 if iid == selected_iid else 1
+            self.timeline_canvas.create_rectangle(x0, y0, max(x1, x0 + 4), y1,
+                                                   fill=color, outline=outline, width=outline_w,
+                                                   tags=("cue", f"iid_{iid}"))
             if label and x1 - x0 > 20:
                 self.timeline_canvas.create_text((x0 + x1) / 2, (y0 + y1) / 2, text=label,
-                                                  font=("", 7), fill="white", tags=("cue", f"iid_{iid}"))
+                                                  font=("", 7, "bold"), fill=self._text_color_for(color),
+                                                  tags=("cue", f"iid_{iid}"))
 
         if self.last_pos is not None:
             x = self.last_pos * self.pixels_per_sec
-            self.timeline_canvas.create_line(x, 0, x, height, fill="red", width=2, tags=("playhead",))
+            self.timeline_canvas.create_line(x, 0, x, height, fill="#ffee58", width=2, tags=("playhead",))
+            self.timeline_canvas.create_polygon(x - 5, 0, x + 5, 0, x, 8, fill="#ffee58", tags=("playhead",))
 
     def _find_timeline_iid(self, event):
         x = self.timeline_canvas.canvasx(event.x)
@@ -743,34 +782,54 @@ class SmokeSyncGUI(tk.Tk):
 
     def _on_timeline_press(self, event):
         iid = self._find_timeline_iid(event)
-        self._timeline_selected = iid
         if iid:
             self.tree_cues.selection_set(iid)
             self.tree_cues.see(iid)
             t, device, modo, valor = self.tree_cues.item(iid, "values")
-            self._timeline_drag = {"iid": iid, "start_x": self.timeline_canvas.canvasx(event.x),
-                                    "orig_t": core.parse_time(t)}
+            x = self.timeline_canvas.canvasx(event.x)
+            self._timeline_drag = {"iid": iid, "start_x": x, "press_x": x,
+                                    "orig_t": core.parse_time(t), "moved": False}
+            self._refresh_timeline()
         else:
             self._timeline_drag = None
 
     def _on_timeline_drag(self, event):
         if not self._timeline_drag:
             return
-        dx = self.timeline_canvas.canvasx(event.x) - self._timeline_drag["start_x"]
+        x = self.timeline_canvas.canvasx(event.x)
+        dx = x - self._timeline_drag["start_x"]
+        if abs(x - self._timeline_drag["press_x"]) > 3:
+            self._timeline_drag["moved"] = True
         self.timeline_canvas.move(f"iid_{self._timeline_drag['iid']}", dx, 0)
-        self._timeline_drag["start_x"] = self.timeline_canvas.canvasx(event.x)
+        self._timeline_drag["start_x"] = x
         self._timeline_drag["orig_t"] = max(0.0, self._timeline_drag["orig_t"] + dx / self.pixels_per_sec)
 
     def _on_timeline_release(self, event):
         if not self._timeline_drag:
             return
         iid = self._timeline_drag["iid"]
-        new_t = max(0.0, self._timeline_drag["orig_t"])
-        vals = list(self.tree_cues.item(iid, "values"))
-        vals[0] = core.fmt_time_ms(new_t)
-        self.tree_cues.item(iid, values=vals)
+        if self._timeline_drag["moved"]:
+            new_t = max(0.0, self._timeline_drag["orig_t"])
+            vals = list(self.tree_cues.item(iid, "values"))
+            vals[0] = core.fmt_time_ms(new_t)
+            self.tree_cues.item(iid, values=vals)
+            self._load_cues_into_tree(self._tree_cues_to_list())
+            new_iid = self._iid_for_time_device(vals[0], vals[1])
+            if new_iid:
+                self.tree_cues.selection_set(new_iid)
+                self._load_cue_into_form(new_iid)
+        else:
+            # Fue un clic simple (sin arrastre real): solo seleccionar y
+            # cargar en el formulario para editar, sin reordenar la lista.
+            self._load_cue_into_form(iid)
         self._timeline_drag = None
-        self._load_cues_into_tree(self._tree_cues_to_list())
+
+    def _iid_for_time_device(self, t, device):
+        for iid in self.tree_cues.get_children():
+            vals = self.tree_cues.item(iid, "values")
+            if vals[0] == t and vals[1] == device:
+                return iid
+        return None
 
     def _on_cue_tree_select(self, _event):
         sel = self.tree_cues.selection()
