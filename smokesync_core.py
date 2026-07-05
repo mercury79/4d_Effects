@@ -133,11 +133,11 @@ def default_device(cfg):
 # ventilador (coincide con las etiquetas usadas por los archivos de la
 # comunidad AVS Forum: OFF/ECO/LOW/MED/HIGH).
 DEFAULT_FAN_STATES = {
-    "OFF":  {"service": "fan/turn_off", "data": {}},
-    "ECO":  {"service": "fan/set_percentage", "data": {"percentage": 25}},
-    "LOW":  {"service": "fan/set_percentage", "data": {"percentage": 45}},
-    "MED":  {"service": "fan/set_percentage", "data": {"percentage": 70}},
-    "HIGH": {"service": "fan/set_percentage", "data": {"percentage": 100}},
+    "OFF":  {"service": "fan/turn_off", "data": {}, "shortcut": "0"},
+    "ECO":  {"service": "fan/set_percentage", "data": {"percentage": 25}, "shortcut": "9"},
+    "LOW":  {"service": "fan/set_percentage", "data": {"percentage": 45}, "shortcut": "1"},
+    "MED":  {"service": "fan/set_percentage", "data": {"percentage": 70}, "shortcut": "2"},
+    "HIGH": {"service": "fan/set_percentage", "data": {"percentage": 100}, "shortcut": "3"},
 }
 
 
@@ -343,6 +343,18 @@ def fmt_time(sec):
     if h:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
+
+
+def fmt_time_ms(sec):
+    """Como fmt_time pero con milisegundos, para capturas en vivo con
+    precision de fotograma (ej. '01:04:29.430')."""
+    sec = max(0.0, float(sec))
+    whole = int(sec)
+    ms = round((sec - whole) * 1000)
+    h, rem = divmod(whole, 3600)
+    m, s = divmod(rem, 60)
+    prefix = f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+    return f"{prefix}.{ms:03d}"
 
 
 # --- Motor de sincronizacion (usado por CLI y GUI) ----------------------------

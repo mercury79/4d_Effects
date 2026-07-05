@@ -59,6 +59,10 @@ class SmokeSyncGUI(tk.Tk):
         self.state_queue = queue.Queue()
         self.status_queue = queue.Queue()
         self.device_status = {}
+        self.shortcut_map = {}
+        self.last_pos = None
+        self.last_title = None
+        self.capture_on = False
         self._monitor_stop = threading.Event()
 
         self._build_ui()
@@ -127,11 +131,11 @@ class SmokeSyncGUI(tk.Tk):
         left = ttk.Frame(f, padding=10)
         left.pack(side="left", fill="both", expand=True)
 
-        cols = ("name", "kind", "entity_id", "detalle", "estado")
+        cols = ("name", "kind", "atajo", "entity_id", "detalle", "estado")
         self.tree_devices = ttk.Treeview(left, columns=cols, show="headings", height=10)
-        headers = {"name": "Nombre", "kind": "Tipo", "entity_id": "entity_id",
+        headers = {"name": "Nombre", "kind": "Tipo", "atajo": "Atajo", "entity_id": "entity_id",
                    "detalle": "Detalle", "estado": "Ultima prueba"}
-        for c, w in zip(cols, (90, 90, 170, 200, 170)):
+        for c, w in zip(cols, (90, 90, 50, 160, 190, 160)):
             self.tree_devices.heading(c, text=headers[c])
             self.tree_devices.column(c, width=w)
         self.tree_devices.pack(fill="both", expand=True)
@@ -147,6 +151,7 @@ class SmokeSyncGUI(tk.Tk):
         self.var_dev_name = tk.StringVar()
         self.var_dev_entity = tk.StringVar()
         self.var_dev_kind = tk.StringVar(value="binary")
+        self.var_dev_shortcut = tk.StringVar()
 
         ttk.Label(right, text="Nombre (ej: humo, agua, luces, ventilador)").pack(anchor="w")
         ttk.Entry(right, textvariable=self.var_dev_name, width=30).pack(fill="x", pady=(0, 8))
@@ -155,6 +160,11 @@ class SmokeSyncGUI(tk.Tk):
         entry_entity = ttk.Entry(right, textvariable=self.var_dev_entity, width=30)
         entry_entity.pack(fill="x", pady=(0, 8))
         entry_entity.bind("<FocusOut>", self._suggest_dev_kind)
+
+        self.frame_dev_shortcut = ttk.Frame(right)
+        self.frame_dev_shortcut.pack(fill="x", pady=(0, 8))
+        ttk.Label(self.frame_dev_shortcut, text="Atajo de teclado (1 caracter, para captura en vivo / Stream Deck)").pack(anchor="w")
+        ttk.Entry(self.frame_dev_shortcut, textvariable=self.var_dev_shortcut, width=4).pack(anchor="w")
 
         ttk.Label(right, text="Tipo de dispositivo").pack(anchor="w")
         kind_frame = ttk.Frame(right)
@@ -175,10 +185,11 @@ class SmokeSyncGUI(tk.Tk):
         self.frame_states = ttk.LabelFrame(right, text="Estados (nombre -> servicio HA)", padding=6)
         self.frame_states.pack(fill="x", pady=(0, 8))
 
-        st_cols = ("state", "service", "data")
+        st_cols = ("state", "service", "data", "shortcut")
         self.tree_states = ttk.Treeview(self.frame_states, columns=st_cols, show="headings", height=5)
-        for c, w in zip(st_cols, (70, 130, 110)):
-            self.tree_states.heading(c, text=c)
+        headers_st = {"state": "state", "service": "service", "data": "data", "shortcut": "atajo"}
+        for c, w in zip(st_cols, (60, 120, 100, 50)):
+            self.tree_states.heading(c, text=headers_st[c])
             self.tree_states.column(c, width=w)
         self.tree_states.pack(fill="x")
         self.tree_states.bind("<Double-1>", self._on_state_double_click)
@@ -188,11 +199,13 @@ class SmokeSyncGUI(tk.Tk):
         self.var_state_name = tk.StringVar()
         self.var_state_service = tk.StringVar()
         self.var_state_data = tk.StringVar(value="{}")
-        ttk.Entry(st_form, textvariable=self.var_state_name, width=8).grid(row=0, column=0, padx=1)
-        ttk.Entry(st_form, textvariable=self.var_state_service, width=16).grid(row=0, column=1, padx=1)
-        ttk.Entry(st_form, textvariable=self.var_state_data, width=14).grid(row=0, column=2, padx=1)
-        ttk.Label(st_form, text="nombre / domain.service / {json datos extra}",
-                  foreground="#666", font=("", 8)).grid(row=1, column=0, columnspan=3, sticky="w")
+        self.var_state_shortcut = tk.StringVar()
+        ttk.Entry(st_form, textvariable=self.var_state_name, width=7).grid(row=0, column=0, padx=1)
+        ttk.Entry(st_form, textvariable=self.var_state_service, width=14).grid(row=0, column=1, padx=1)
+        ttk.Entry(st_form, textvariable=self.var_state_data, width=12).grid(row=0, column=2, padx=1)
+        ttk.Entry(st_form, textvariable=self.var_state_shortcut, width=3).grid(row=0, column=3, padx=1)
+        ttk.Label(st_form, text="nombre / domain.service / {json} / atajo",
+                  foreground="#666", font=("", 8)).grid(row=1, column=0, columnspan=4, sticky="w")
         btn_row = ttk.Frame(self.frame_states)
         btn_row.pack(fill="x", pady=(4, 0))
         ttk.Button(btn_row, text="Agregar/editar estado", command=self._add_state_row).pack(side="left")
@@ -225,12 +238,15 @@ class SmokeSyncGUI(tk.Tk):
     def _on_dev_kind_change(self):
         if self.var_dev_kind.get() == "multi_state":
             self.frame_states.pack(fill="x", pady=(0, 8))
+            self.frame_dev_shortcut.pack_forget()
         else:
             self.frame_states.pack_forget()
+            self.frame_dev_shortcut.pack(fill="x", pady=(0, 8))
 
     def _add_state_row(self):
         name = self.var_state_name.get().strip().upper()
         service = self.var_state_service.get().strip()
+        shortcut = self.var_state_shortcut.get().strip()
         if not name or not service:
             messagebox.showwarning("Falta informacion", "Nombre de estado y servicio son requeridos.")
             return
@@ -241,10 +257,11 @@ class SmokeSyncGUI(tk.Tk):
             return
         if self.tree_states.exists(name):
             self.tree_states.delete(name)
-        self.tree_states.insert("", "end", iid=name, values=(name, service, json.dumps(data)))
+        self.tree_states.insert("", "end", iid=name, values=(name, service, json.dumps(data), shortcut))
         self.var_state_name.set("")
         self.var_state_service.set("")
         self.var_state_data.set("{}")
+        self.var_state_shortcut.set("")
 
     def _remove_state_row(self):
         sel = self.tree_states.selection()
@@ -255,16 +272,17 @@ class SmokeSyncGUI(tk.Tk):
         sel = self.tree_states.selection()
         if not sel:
             return
-        name, service, data = self.tree_states.item(sel[0], "values")
+        name, service, data, shortcut = self.tree_states.item(sel[0], "values")
         self.var_state_name.set(name)
         self.var_state_service.set(service)
         self.var_state_data.set(data)
+        self.var_state_shortcut.set(shortcut)
 
     def _load_fan_template(self):
         self.tree_states.delete(*self.tree_states.get_children())
         for name, s in core.DEFAULT_FAN_STATES.items():
             self.tree_states.insert("", "end", iid=name,
-                                     values=(name, s["service"], json.dumps(s["data"])))
+                                     values=(name, s["service"], json.dumps(s["data"]), s.get("shortcut", "")))
 
     # -- Tab: Editor de Cues --------------------------------------------------
     def _build_cues_tab(self):
@@ -293,20 +311,71 @@ class SmokeSyncGUI(tk.Tk):
         self.var_sheet_filename = tk.StringVar()
         ttk.Label(meta, text="Match (substring del titulo)").grid(row=0, column=0, sticky="w")
         ttk.Entry(meta, textvariable=self.var_sheet_match, width=28).grid(row=0, column=1, sticky="w", padx=4)
-        ttk.Label(meta, text="Lead time (s)").grid(row=0, column=2, sticky="w")
-        ttk.Entry(meta, textvariable=self.var_sheet_lead, width=6).grid(row=0, column=3, sticky="w", padx=4)
+        ttk.Button(meta, text="Usar titulo actual (Zidoo)", command=self._use_current_title).grid(row=0, column=2, sticky="w", padx=4)
+        ttk.Label(meta, text="Lead time (s)").grid(row=0, column=3, sticky="w")
+        ttk.Entry(meta, textvariable=self.var_sheet_lead, width=6).grid(row=0, column=4, sticky="w", padx=4)
         ttk.Label(meta, text="Archivo").grid(row=1, column=0, sticky="w", pady=(4, 0))
         ttk.Entry(meta, textvariable=self.var_sheet_filename, width=28).grid(row=1, column=1, sticky="w", padx=4, pady=(4, 0))
-        ttk.Button(meta, text="Guardar cue sheet", command=self._save_sheet).grid(row=1, column=3, sticky="w", pady=(4, 0))
+        ttk.Button(meta, text="Guardar cue sheet", command=self._save_sheet).grid(row=1, column=4, sticky="w", pady=(4, 0))
+
+        # -- Captura en vivo: mientras el Zidoo reproduce, presiona el atajo
+        # de un dispositivo (o el boton de un Stream Deck configurado para
+        # enviar esa tecla) y se inserta un cue en la posicion actual.
+        capture = ttk.LabelFrame(right, text="Captura en vivo (atajos de teclado / Stream Deck)", padding=6)
+        capture.pack(fill="x", pady=(0, 8))
+        self.var_capture_on = tk.BooleanVar(value=False)
+        ttk.Checkbutton(capture, text="Activar captura", variable=self.var_capture_on,
+                        command=self._toggle_capture).pack(side="left")
+        self.lbl_capture_pos = ttk.Label(capture, text="Posicion: -")
+        self.lbl_capture_pos.pack(side="left", padx=10)
+        self.lbl_capture_legend = ttk.Label(capture, text="(sin atajos configurados)",
+                                             foreground="#666", wraplength=420)
+        self.lbl_capture_legend.pack(side="left", padx=10)
 
         cols = ("t", "device", "modo", "valor")
-        self.tree_cues = ttk.Treeview(right, columns=cols, show="headings", height=16)
+        self.tree_cues = ttk.Treeview(right, columns=cols, show="headings", height=10)
         headers = {"t": "Timestamp", "device": "Dispositivo", "modo": "Modo", "valor": "Duracion / Estado"}
         for c, w in zip(cols, (110, 110, 90, 130)):
             self.tree_cues.heading(c, text=headers[c])
             self.tree_cues.column(c, width=w)
         self.tree_cues.pack(fill="both", expand=True)
         self.tree_cues.bind("<Double-1>", self._on_cue_double_click)
+        self.tree_cues.bind("<<TreeviewSelect>>", self._on_cue_tree_select)
+
+        # -- Timeline visual (multi-pista, una fila por dispositivo) --------
+        timeline_frame = ttk.LabelFrame(right, text="Timeline", padding=6)
+        timeline_frame.pack(fill="x", pady=(8, 0))
+        zoom_row = ttk.Frame(timeline_frame)
+        zoom_row.pack(fill="x")
+        ttk.Label(zoom_row, text="Zoom:").pack(side="left")
+        ttk.Button(zoom_row, text="-", width=2, command=lambda: self._zoom_timeline(0.7)).pack(side="left")
+        ttk.Button(zoom_row, text="+", width=2, command=lambda: self._zoom_timeline(1.4)).pack(side="left")
+        ttk.Label(zoom_row, text="  Clic: seleccionar/arrastrar para mover en el tiempo. Supr: eliminar.",
+                  foreground="#666").pack(side="left", padx=8)
+
+        self.pixels_per_sec = 4.0
+        self.timeline_row_h = 26
+        canvas_area = ttk.Frame(timeline_frame)
+        canvas_area.pack(fill="both", expand=True, pady=(4, 0))
+
+        self.timeline_labels = tk.Canvas(canvas_area, width=90, height=160, background="#f0f0f0",
+                                          highlightthickness=0)
+        self.timeline_labels.pack(side="left", fill="y")
+
+        canvas_wrap = ttk.Frame(canvas_area)
+        canvas_wrap.pack(side="left", fill="both", expand=True)
+        self.timeline_canvas = tk.Canvas(canvas_wrap, height=160, background="white", highlightthickness=0)
+        hscroll = ttk.Scrollbar(canvas_wrap, orient="horizontal", command=self.timeline_canvas.xview)
+        self.timeline_canvas.configure(xscrollcommand=hscroll.set)
+        self.timeline_canvas.pack(fill="both", expand=True, side="top")
+        hscroll.pack(fill="x", side="top")
+        self.timeline_canvas.bind("<ButtonPress-1>", self._on_timeline_press)
+        self.timeline_canvas.bind("<B1-Motion>", self._on_timeline_drag)
+        self.timeline_canvas.bind("<ButtonRelease-1>", self._on_timeline_release)
+        self.bind("<Delete>", self._on_delete_key)
+        self.bind("<BackSpace>", self._on_delete_key)
+        self._timeline_drag = None
+        self._timeline_selected = None
 
         form = ttk.LabelFrame(right, text="Agregar / editar cue", padding=8)
         form.pack(fill="x", pady=8)
@@ -413,6 +482,7 @@ class SmokeSyncGUI(tk.Tk):
                 modo, valor = "scene", ""
             self.tree_cues.insert("", "end", iid=str(i),
                                    values=(cue["t"], cue.get("device", ""), modo, valor))
+        self._refresh_timeline()
 
     def _tree_cues_to_list(self):
         cues = []
@@ -434,6 +504,7 @@ class SmokeSyncGUI(tk.Tk):
         self.var_sheet_lead.set(str(self.cfg.get("lead_time_s", 4)))
         self.var_sheet_filename.set("nuevo_cue_sheet.json")
         self.tree_cues.delete(*self.tree_cues.get_children())
+        self._refresh_timeline()
 
     def _delete_sheet(self):
         sel = self.list_sheets.curselection()
@@ -489,6 +560,222 @@ class SmokeSyncGUI(tk.Tk):
         sel = self.tree_cues.selection()
         if sel:
             self.tree_cues.delete(sel[0])
+            self._refresh_timeline()
+
+    def _on_delete_key(self, event):
+        # No interferir con Backspace/Supr mientras se edita texto en un
+        # campo (Entry/Combobox/Text); solo actuar si el foco esta en la
+        # tabla o el canvas de la timeline.
+        if isinstance(event.widget, (tk.Entry, ttk.Entry, tk.Text, ttk.Combobox)):
+            return
+        self._delete_cue()
+
+    def _use_current_title(self):
+        j = core.zidoo_status(self.cfg)
+        if j.get("_error"):
+            messagebox.showwarning("Sin conexion", f"No pude leer el Zidoo: {j['_error']}")
+            return
+        title, _pos, _playing = core.parse_playback(j)
+        if not title:
+            messagebox.showinfo("Sin titulo", "El Zidoo no reporta un titulo en este momento.")
+            return
+        self.var_sheet_match.set(title)
+        if not self.var_sheet_filename.get() or self.var_sheet_filename.get() == "nuevo_cue_sheet.json":
+            slug = "".join(c if c.isalnum() else "_" for c in title.lower()).strip("_")
+            self.var_sheet_filename.set(f"{slug}.json")
+        self.log(f"Titulo actual del Zidoo: '{title}'")
+
+    # ---- Captura en vivo (atajos de teclado / Stream Deck) ----------------
+    def _toggle_capture(self):
+        self.capture_on = self.var_capture_on.get()
+        if self.capture_on:
+            self._capture_bind_id = self.bind_all("<KeyPress>", self._on_capture_key)
+            self.log("Captura en vivo activada.")
+        else:
+            if getattr(self, "_capture_bind_id", None):
+                self.unbind_all("<KeyPress>")
+            self.log("Captura en vivo desactivada.")
+
+    def _refresh_capture_legend(self):
+        if not self.shortcut_map:
+            self.lbl_capture_legend.config(text="(sin atajos configurados - agrega uno en Dispositivos)")
+            return
+        parts = []
+        for key, (dev_name, mode, extra) in sorted(self.shortcut_map.items()):
+            label = f"{dev_name}:{extra}" if mode == "state" else dev_name
+            parts.append(f"{key}={label}")
+        self.lbl_capture_legend.config(text="  ".join(parts))
+
+    def _update_capture_pos_label(self):
+        if self.last_pos is None:
+            self.lbl_capture_pos.config(text="Posicion: -")
+        else:
+            self.lbl_capture_pos.config(text=f"Posicion: {core.fmt_time_ms(self.last_pos)}")
+
+    def _on_capture_key(self, event):
+        if not self.capture_on:
+            return
+        # No capturar mientras el usuario esta escribiendo en un campo de texto.
+        if isinstance(event.widget, (tk.Entry, ttk.Entry, tk.Text, ttk.Combobox)):
+            return
+        key = (event.char or event.keysym).strip().upper()
+        match = self.shortcut_map.get(key)
+        if not match:
+            return
+        if self.last_pos is None:
+            self.log("[captura] sin posicion del Zidoo todavia (¿esta reproduciendo?).")
+            return
+        device_name, mode, extra = match
+        t = core.fmt_time_ms(self.last_pos)
+        cues = self._tree_cues_to_list()
+        if mode == "state":
+            cues.append({"t": t, "device": device_name, "state": extra})
+            desc = f"estado {extra}"
+        elif mode == "scene":
+            cues.append({"t": t, "device": device_name})
+            desc = "activar escena"
+        else:
+            dur = self.cfg.get("default_duration_s", 3)
+            cues.append({"t": t, "device": device_name, "duration_s": dur})
+            desc = f"rafaga {dur}s"
+        self._load_cues_into_tree(cues)
+        self.log(f"[captura] {t} -> {device_name} ({desc})")
+
+    # ---- Timeline visual ---------------------------------------------------
+    def _timeline_color(self, modo, valor):
+        if modo == "burst":
+            return "#e08a3c"
+        if modo == "scene":
+            return "#8a5cd6"
+        # 'state': color estable por nombre de estado (mismo estado = mismo color)
+        palette = ["#4c9be8", "#4cbf7a", "#e0c93c", "#e05c5c", "#5ce0d8", "#c95ce0"]
+        return palette[hash(valor) % len(palette)]
+
+    def _zoom_timeline(self, factor):
+        self.pixels_per_sec = max(0.5, min(40.0, self.pixels_per_sec * factor))
+        self._refresh_timeline()
+
+    def _refresh_timeline(self):
+        if not hasattr(self, "timeline_canvas"):
+            return
+        self.timeline_canvas.delete("all")
+        self.timeline_labels.delete("all")
+
+        devices = self.cfg.get("devices", [])
+        row_h = self.timeline_row_h
+        device_index = {d["name"]: i for i, d in enumerate(devices)}
+        height = max(row_h * max(len(devices), 1), 60)
+        self.timeline_labels.configure(height=height)
+        self.timeline_canvas.configure(height=height)
+
+        for i, d in enumerate(devices):
+            y = i * row_h
+            self.timeline_labels.create_rectangle(0, y, 90, y + row_h,
+                                                   fill="#e8e8e8" if i % 2 else "#f0f0f0", outline="")
+            self.timeline_labels.create_text(6, y + row_h / 2, anchor="w", text=d["name"], font=("", 8))
+
+        items = list(self.tree_cues.get_children())
+        max_t = 60.0
+        parsed = []
+        for iid in items:
+            t, device, modo, valor = self.tree_cues.item(iid, "values")
+            try:
+                t_s = core.parse_time(t)
+            except Exception:
+                continue
+            parsed.append((iid, t_s, device, modo, valor))
+            dur = float(str(valor).rstrip("s") or 0) if modo == "burst" else 0
+            max_t = max(max_t, t_s + dur)
+
+        total_w = max(700, int((max_t + 30) * self.pixels_per_sec))
+        self.timeline_canvas.configure(scrollregion=(0, 0, total_w, height))
+
+        # Lineas de fondo por fila (para leer mejor a que dispositivo pertenece)
+        for i in range(len(devices)):
+            y = i * row_h
+            self.timeline_canvas.create_rectangle(0, y, total_w, y + row_h,
+                                                    fill="#f7f7f7" if i % 2 else "white", outline="")
+
+        parsed.sort(key=lambda p: p[1])
+        by_device = {}
+        for iid, t_s, device, modo, valor in parsed:
+            by_device.setdefault(device, []).append((iid, t_s, modo, valor))
+
+        for iid, t_s, device, modo, valor in parsed:
+            row = device_index.get(device)
+            if row is None:
+                continue
+            y0 = row * row_h + 2
+            y1 = y0 + row_h - 4
+            x0 = t_s * self.pixels_per_sec
+            if modo == "burst":
+                dur = float(str(valor).rstrip("s") or self.cfg.get("default_duration_s", 3))
+                x1 = x0 + max(dur, 0.3) * self.pixels_per_sec
+                label = f"{valor}"
+            elif modo == "state":
+                siblings = sorted(by_device.get(device, []), key=lambda s: s[1])
+                nxt = next((s[1] for s in siblings if s[1] > t_s), None)
+                x1 = (nxt if nxt is not None else t_s + 20) * self.pixels_per_sec
+                label = valor
+            else:  # scene
+                x1 = x0 + 6
+                label = ""
+            color = self._timeline_color(modo, valor)
+            rect = self.timeline_canvas.create_rectangle(x0, y0, max(x1, x0 + 4), y1,
+                                                           fill=color, outline="#333",
+                                                           tags=("cue", f"iid_{iid}"))
+            if label and x1 - x0 > 20:
+                self.timeline_canvas.create_text((x0 + x1) / 2, (y0 + y1) / 2, text=label,
+                                                  font=("", 7), fill="white", tags=("cue", f"iid_{iid}"))
+
+        if self.last_pos is not None:
+            x = self.last_pos * self.pixels_per_sec
+            self.timeline_canvas.create_line(x, 0, x, height, fill="red", width=2, tags=("playhead",))
+
+    def _find_timeline_iid(self, event):
+        x = self.timeline_canvas.canvasx(event.x)
+        y = self.timeline_canvas.canvasy(event.y)
+        for item in self.timeline_canvas.find_overlapping(x, y, x, y):
+            for tag in self.timeline_canvas.gettags(item):
+                if tag.startswith("iid_"):
+                    return tag[4:]
+        return None
+
+    def _on_timeline_press(self, event):
+        iid = self._find_timeline_iid(event)
+        self._timeline_selected = iid
+        if iid:
+            self.tree_cues.selection_set(iid)
+            self.tree_cues.see(iid)
+            t, device, modo, valor = self.tree_cues.item(iid, "values")
+            self._timeline_drag = {"iid": iid, "start_x": self.timeline_canvas.canvasx(event.x),
+                                    "orig_t": core.parse_time(t)}
+        else:
+            self._timeline_drag = None
+
+    def _on_timeline_drag(self, event):
+        if not self._timeline_drag:
+            return
+        dx = self.timeline_canvas.canvasx(event.x) - self._timeline_drag["start_x"]
+        self.timeline_canvas.move(f"iid_{self._timeline_drag['iid']}", dx, 0)
+        self._timeline_drag["start_x"] = self.timeline_canvas.canvasx(event.x)
+        self._timeline_drag["orig_t"] = max(0.0, self._timeline_drag["orig_t"] + dx / self.pixels_per_sec)
+
+    def _on_timeline_release(self, event):
+        if not self._timeline_drag:
+            return
+        iid = self._timeline_drag["iid"]
+        new_t = max(0.0, self._timeline_drag["orig_t"])
+        vals = list(self.tree_cues.item(iid, "values"))
+        vals[0] = core.fmt_time_ms(new_t)
+        self.tree_cues.item(iid, values=vals)
+        self._timeline_drag = None
+        self._load_cues_into_tree(self._tree_cues_to_list())
+
+    def _on_cue_tree_select(self, _event):
+        sel = self.tree_cues.selection()
+        if sel:
+            self._refresh_timeline()
 
     def _save_sheet(self):
         fname = self.var_sheet_filename.get().strip()
@@ -615,6 +902,10 @@ class SmokeSyncGUI(tk.Tk):
                 self.lbl_pos.config(text=f"Posicion: {core.fmt_time(pos or 0)}  (reproduciendo: {playing})")
                 self.lbl_sheet.config(text=f"Cue sheet: {sheet['_file'] if sheet else '(ninguna)'}")
                 self.lbl_zidoo.config(text="Zidoo: OK", foreground="green")
+                self.last_title = title
+                self.last_pos = pos
+                if hasattr(self, "lbl_capture_pos"):
+                    self._update_capture_pos_label()
         except queue.Empty:
             pass
         self.after(500, self._poll_state_queue)
@@ -654,17 +945,22 @@ class SmokeSyncGUI(tk.Tk):
         self.tree_devices.delete(*self.tree_devices.get_children())
         for d in self.cfg.get("devices", []):
             if d.get("kind") == "multi_state":
+                keys = ",".join(f"{n}:{s.get('shortcut','')}" for n, s in d.get("states", {}).items() if s.get("shortcut"))
                 detalle = ", ".join(sorted(d.get("states", {}).keys()))
-            elif d.get("kind") == "scene":
-                detalle = f"activar: {d.get('activate_service', 'scene/turn_on')}"
+                atajo = keys
             else:
-                detalle = f"{d.get('on_service', '')} / {d.get('off_service', '')}"
+                atajo = d.get("shortcut", "")
+                if d.get("kind") == "scene":
+                    detalle = f"activar: {d.get('activate_service', 'scene/turn_on')}"
+                else:
+                    detalle = f"{d.get('on_service', '')} / {d.get('off_service', '')}"
             estado = self.device_status.get(d["name"], "") if hasattr(self, "device_status") else ""
             self.tree_devices.insert("", "end", iid=d["name"],
-                                      values=(d["name"], d.get("kind", "binary"), d["entity_id"], detalle, estado))
+                                      values=(d["name"], d.get("kind", "binary"), atajo, d["entity_id"], detalle, estado))
         self._refresh_test_state_options()
         if hasattr(self, "combo_cue_device"):
             self._refresh_cue_device_options()
+        self._refresh_shortcut_map()
 
     def _refresh_test_state_options(self, device=None):
         if device and device.get("kind") == "multi_state":
@@ -674,6 +970,25 @@ class SmokeSyncGUI(tk.Tk):
         else:
             self.combo_test_state["values"] = []
             self.var_test_state.set("")
+
+    def _refresh_shortcut_map(self):
+        """Construye char -> (device_name, modo, extra) para la captura en
+        vivo (teclado / Stream Deck configurado para enviar teclas)."""
+        mapping = {}
+        for d in self.cfg.get("devices", []):
+            if d.get("kind") == "multi_state":
+                for st_name, s in d.get("states", {}).items():
+                    key = (s.get("shortcut") or "").strip().upper()
+                    if key:
+                        mapping[key] = (d["name"], "state", st_name)
+            else:
+                key = (d.get("shortcut") or "").strip().upper()
+                if key:
+                    mode = "scene" if d.get("kind") == "scene" else "burst"
+                    mapping[key] = (d["name"], mode, None)
+        self.shortcut_map = mapping
+        if hasattr(self, "lbl_capture_legend"):
+            self._refresh_capture_legend()
 
     def _on_device_select(self, _event):
         sel = self.tree_devices.selection()
@@ -691,11 +1006,13 @@ class SmokeSyncGUI(tk.Tk):
         self.var_dev_name.set(device["name"])
         self.var_dev_entity.set(device["entity_id"])
         self.var_dev_kind.set(device.get("kind", "binary"))
+        self.var_dev_shortcut.set(device.get("shortcut", ""))
         self.tree_states.delete(*self.tree_states.get_children())
         if device.get("kind") == "multi_state":
             for name, s in device.get("states", {}).items():
                 self.tree_states.insert("", "end", iid=name,
-                                         values=(name, s["service"], json.dumps(s.get("data", {}))))
+                                         values=(name, s["service"], json.dumps(s.get("data", {})),
+                                                 s.get("shortcut", "")))
         self._on_dev_kind_change()
         self._refresh_test_state_options(device)
 
@@ -703,6 +1020,7 @@ class SmokeSyncGUI(tk.Tk):
         name = self.var_dev_name.get().strip()
         entity = self.var_dev_entity.get().strip()
         kind = self.var_dev_kind.get()
+        shortcut = self.var_dev_shortcut.get().strip()
         if not name or not entity:
             messagebox.showwarning("Falta informacion", "Nombre y entity_id son requeridos.")
             return
@@ -710,18 +1028,20 @@ class SmokeSyncGUI(tk.Tk):
         if kind == "multi_state":
             states = {}
             for iid in self.tree_states.get_children():
-                st_name, service, data = self.tree_states.item(iid, "values")
-                states[st_name] = {"service": service, "data": json.loads(data or "{}")}
+                st_name, service, data, st_shortcut = self.tree_states.item(iid, "values")
+                states[st_name] = {"service": service, "data": json.loads(data or "{}"),
+                                    "shortcut": st_shortcut}
             if not states:
                 messagebox.showwarning("Sin estados", "Agrega al menos un estado (o usa 'Plantilla ventilador').")
                 return
             device = {"name": name, "kind": "multi_state", "entity_id": entity, "states": states}
         elif kind == "scene":
-            device = {"name": name, "kind": "scene", "entity_id": entity, "activate_service": "scene/turn_on"}
+            device = {"name": name, "kind": "scene", "entity_id": entity,
+                      "activate_service": "scene/turn_on", "shortcut": shortcut}
         else:
             on_srv, off_srv = core.services_for_entity(entity)
             device = {"name": name, "kind": "binary", "entity_id": entity,
-                      "on_service": on_srv, "off_service": off_srv}
+                      "on_service": on_srv, "off_service": off_srv, "shortcut": shortcut}
 
         original_name = getattr(self, "_editing_original_name", None)
         devices = [d for d in self.cfg.get("devices", [])
@@ -731,8 +1051,10 @@ class SmokeSyncGUI(tk.Tk):
         core.save_config(self.cfg)
         self._editing_original_name = None
         self._refresh_devices_list()
+        self._refresh_shortcut_map()
         self.var_dev_name.set("")
         self.var_dev_entity.set("")
+        self.var_dev_shortcut.set("")
         self.tree_states.delete(*self.tree_states.get_children())
         self.log(f"Dispositivo '{name}' guardado ({entity}).")
 
@@ -780,7 +1102,7 @@ class SmokeSyncGUI(tk.Tk):
         self.device_status[name] = text
         if self.tree_devices.exists(name):
             vals = list(self.tree_devices.item(name, "values"))
-            vals[4] = text
+            vals[5] = text
             self.tree_devices.item(name, values=vals)
         self.lbl_test_result.config(text=f"{name}: {text}")
 
