@@ -65,6 +65,7 @@ class SmokeSyncGUI(tk.Tk):
         self.last_title = None
         self.capture_on = False
         self._capture_held = {}
+        self._capture_release_jobs = {}
         self._monitor_stop = threading.Event()
 
         self._build_ui()
@@ -647,18 +648,28 @@ class SmokeSyncGUI(tk.Tk):
         self.log(f"Titulo actual del Zidoo: '{title}'")
 
     # ---- Captura en vivo (atajos de teclado / Stream Deck) ----------------
+    # Cuanto esperar tras un KeyRelease antes de darlo por bueno: si en ese
+    # lapso llega un KeyPress de la misma tecla, era autorepeat del SO
+    # (muchos sistemas mandan Release+Press sinteticos en cada repeticion
+    # mientras la tecla sigue fisicamente sostenida), no una soltada real.
+    CAPTURE_REPEAT_GUARD_MS = 60
+
     def _toggle_capture(self):
         self.capture_on = self.var_capture_on.get()
         if self.capture_on:
             self.bind_all("<KeyPress>", self._on_capture_keypress)
             self.bind_all("<KeyRelease>", self._on_capture_keyrelease)
             self._capture_held = {}
+            self._capture_release_jobs = {}
             self.log("Captura en vivo activada. Rafagas: toque corto = duracion por "
                      "defecto, mantener presionada = duracion exacta sostenida.")
         else:
             self.unbind_all("<KeyPress>")
             self.unbind_all("<KeyRelease>")
+            for job in self._capture_release_jobs.values():
+                self.after_cancel(job)
             self._capture_held = {}
+            self._capture_release_jobs = {}
             self.log("Captura en vivo desactivada.")
 
     def _update_capture_pos_label(self):
@@ -678,13 +689,29 @@ class SmokeSyncGUI(tk.Tk):
         match = self.shortcut_map.get(key)
         if not match:
             return
+
+        # Si habia un "release" pendiente de confirmar para esta tecla, este
+        # KeyPress llego dentro de la ventana de gracia: era autorepeat, no
+        # una soltada real. Cancelamos el release y seguimos sosteniendo.
+        pending_job = self._capture_release_jobs.pop(key, None)
+        if pending_job:
+            self.after_cancel(pending_job)
+            return
+
+        if key in self._capture_held:
+            return  # ya esta registrada (no deberia pasar, por seguridad)
+
         if self.last_pos is None:
             self.log("[captura] sin posicion del Zidoo todavia (¿esta reproduciendo?).")
             return
+
         device_name, mode, extra = match
+        self._capture_held[key] = {"device": device_name, "mode": mode, "extra": extra,
+                                    "press_pos": self.last_pos}
 
         if mode != "burst":
-            # Estado/escena: instantaneo, no tiene duracion que sostener.
+            # Estado/escena: instantaneo al presionar, no tiene duracion que
+            # sostener (el "held" solo sirve aqui para ignorar el autorepeat).
             t = core.fmt_time_ms(self.last_pos)
             cues = self._tree_cues_to_list()
             if mode == "state":
@@ -695,20 +722,20 @@ class SmokeSyncGUI(tk.Tk):
                 desc = "activar escena"
             self._load_cues_into_tree(cues)
             self.log(f"[captura] {t} -> {device_name} ({desc})")
-            return
-
-        # Rafaga: si la tecla ya esta sostenida (autorepeat del SO), ignorar;
-        # solo registramos el instante del primer KeyPress.
-        if key in self._capture_held:
-            return
-        self._capture_held[key] = {"device": device_name, "press_pos": self.last_pos}
 
     def _on_capture_keyrelease(self, event):
         if not self.capture_on or self._is_text_entry(event.widget):
             return
         key = (event.char or event.keysym).strip().upper()
+        if key not in self._capture_held:
+            return
+        job = self.after(self.CAPTURE_REPEAT_GUARD_MS, self._finalize_capture_release, key)
+        self._capture_release_jobs[key] = job
+
+    def _finalize_capture_release(self, key):
+        self._capture_release_jobs.pop(key, None)
         held = self._capture_held.pop(key, None)
-        if not held or self.last_pos is None:
+        if not held or held["mode"] != "burst" or self.last_pos is None:
             return
         press_pos = held["press_pos"]
         device_name = held["device"]
