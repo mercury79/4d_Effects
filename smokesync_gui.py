@@ -388,9 +388,12 @@ class SmokeSyncGUI(tk.Tk):
         ttk.Entry(meta, textvariable=self.var_sheet_filename, width=28).grid(row=1, column=1, sticky="w", padx=4, pady=(4, 0))
         ttk.Button(meta, text="Guardar cue sheet", command=self._save_sheet).grid(row=1, column=4, sticky="w", pady=(4, 0))
 
-        # -- Captura en vivo: mientras el Zidoo reproduce, presiona el atajo
-        # de un dispositivo (o el boton de un Stream Deck configurado para
-        # enviar esa tecla) y se inserta un cue en la posicion actual.
+        self._build_video_preview(right)
+
+        # -- Captura en vivo: mientras el Zidoo reproduce (o el video local en
+        # vista previa), presiona el atajo de un dispositivo (o el boton de un
+        # Stream Deck configurado para enviar esa tecla) y se inserta un cue
+        # en la posicion actual.
         capture = ttk.LabelFrame(right, text="Captura en vivo (atajos de teclado / Stream Deck)", padding=6)
         capture.pack(fill="x", pady=(0, 8))
         self.var_capture_on = tk.BooleanVar(value=False)
@@ -490,6 +493,128 @@ class SmokeSyncGUI(tk.Tk):
         self._refresh_cue_device_options()
         self._new_sheet()
         self._refresh_sheet_list()
+
+    # ---- Vista previa de video embebida (libVLC) -----------------------
+    def _build_video_preview(self, parent):
+        self.vlc_instance = None
+        self.vlc_player = None
+        self.preview_active = False
+        self._preview_seek_dragging = False
+        self._preview_duration_s = 0.0
+
+        box = ttk.LabelFrame(parent, text="Vista previa de video (edicion local, no requiere el Zidoo)", padding=6)
+        box.pack(fill="x", pady=(0, 8))
+
+        toolbar = ttk.Frame(box)
+        toolbar.pack(fill="x")
+        ttk.Button(toolbar, text="Abrir video...", command=self._open_preview_video).pack(side="left")
+        self.btn_preview_play = ttk.Button(toolbar, text="Reproducir", command=self._toggle_preview_play, state="disabled")
+        self.btn_preview_play.pack(side="left", padx=4)
+        ttk.Button(toolbar, text="Cerrar", command=self._close_preview_video).pack(side="left")
+        self.lbl_preview_file = ttk.Label(toolbar, text="(sin video cargado)", foreground="#666")
+        self.lbl_preview_file.pack(side="left", padx=10)
+
+        self.frame_preview_video = tk.Frame(box, background="black", height=280)
+        self.frame_preview_video.pack(fill="x", pady=(6, 4))
+        self.frame_preview_video.pack_propagate(False)
+
+        seek_row = ttk.Frame(box)
+        seek_row.pack(fill="x")
+        self.var_preview_seek = tk.DoubleVar(value=0.0)
+        self.scale_preview = ttk.Scale(seek_row, from_=0, to=1000, variable=self.var_preview_seek,
+                                        orient="horizontal", command=self._on_preview_seek_drag)
+        self.scale_preview.pack(side="left", fill="x", expand=True)
+        self.scale_preview.bind("<ButtonPress-1>", lambda e: setattr(self, "_preview_seek_dragging", True))
+        self.scale_preview.bind("<ButtonRelease-1>", self._on_preview_seek_release)
+        self.lbl_preview_time = ttk.Label(seek_row, text="00:00 / 00:00", width=14)
+        self.lbl_preview_time.pack(side="left", padx=6)
+        ttk.Label(box, text="Con el video en reproduccion, los atajos de captura en vivo\n"
+                            "usan esta posicion (igual que si fuera el Zidoo real).",
+                  foreground="#666", font=("", 8)).pack(anchor="w", pady=(2, 0))
+
+    def _open_preview_video(self):
+        path = filedialog.askopenfilename(
+            title="Selecciona un video",
+            filetypes=[("Video", "*.mp4 *.mkv *.mov *.avi *.m4v *.ts"), ("Todos", "*.*")])
+        if not path:
+            return
+        try:
+            import vlc
+        except ImportError:
+            messagebox.showerror("Falta python-vlc",
+                                  "Instala con: pip install python-vlc\n"
+                                  "(requiere tener VLC instalado en el sistema)")
+            return
+        if self.vlc_instance is None:
+            self.vlc_instance = vlc.Instance()
+            self.vlc_player = self.vlc_instance.media_player_new()
+            handle = self.frame_preview_video.winfo_id()
+            if sys.platform.startswith("linux"):
+                self.vlc_player.set_xwindow(handle)
+            elif sys.platform == "win32":
+                self.vlc_player.set_hwnd(handle)
+            elif sys.platform == "darwin":
+                self.vlc_player.set_nsobject(handle)
+        media = self.vlc_instance.media_new(path)
+        self.vlc_player.set_media(media)
+        self.vlc_player.play()
+        self.preview_active = True
+        self.lbl_preview_file.config(text=Path(path).name)
+        self.btn_preview_play.config(state="normal", text="Pausar")
+        self.after(300, self._poll_preview_player)
+
+    def _toggle_preview_play(self):
+        if not self.vlc_player:
+            return
+        if self.vlc_player.is_playing():
+            self.vlc_player.pause()
+            self.btn_preview_play.config(text="Reproducir")
+        else:
+            self.vlc_player.play()
+            self.btn_preview_play.config(text="Pausar")
+
+    def _close_preview_video(self):
+        if self.vlc_player:
+            self.vlc_player.stop()
+        self.preview_active = False
+        self.lbl_preview_file.config(text="(sin video cargado)")
+        self.btn_preview_play.config(state="disabled", text="Reproducir")
+        self.lbl_preview_time.config(text="00:00 / 00:00")
+
+    def _on_preview_seek_drag(self, _value):
+        if self._preview_seek_dragging and self._preview_duration_s:
+            frac = self.var_preview_seek.get() / 1000.0
+            self.lbl_preview_time.config(
+                text=f"{core.fmt_time(frac * self._preview_duration_s)} / {core.fmt_time(self._preview_duration_s)}")
+
+    def _on_preview_seek_release(self, _event):
+        self._preview_seek_dragging = False
+        if self.vlc_player and self._preview_duration_s:
+            frac = self.var_preview_seek.get() / 1000.0
+            self.vlc_player.set_time(int(frac * self._preview_duration_s * 1000))
+
+    def seek_preview_to(self, seconds):
+        """Mueve la vista previa a un timestamp (usado al hacer clic en la regla del timeline)."""
+        if self.vlc_player and self.preview_active:
+            self.vlc_player.set_time(int(max(0, seconds) * 1000))
+
+    def _poll_preview_player(self):
+        if self.preview_active and self.vlc_player:
+            length_ms = self.vlc_player.get_length()
+            time_ms = self.vlc_player.get_time()
+            if length_ms and length_ms > 0:
+                self._preview_duration_s = length_ms / 1000.0
+                if not self._preview_seek_dragging:
+                    self.var_preview_seek.set((time_ms / length_ms) * 1000.0)
+                pos_s = time_ms / 1000.0
+                self.lbl_preview_time.config(
+                    text=f"{core.fmt_time(pos_s)} / {core.fmt_time(self._preview_duration_s)}")
+                self.last_pos = pos_s
+                self.last_title = self.lbl_preview_file.cget("text")
+                self._draw_playhead()
+                if hasattr(self, "lbl_capture_pos"):
+                    self._update_capture_pos_label()
+            self.after(200, self._poll_preview_player)
 
     # ---- helpers de la pestana de cues --------------------------------
     def _refresh_cue_device_options(self):
@@ -1012,6 +1137,11 @@ class SmokeSyncGUI(tk.Tk):
         shift = bool(event.state & self.SHIFT_MASK)
         ctrl = bool(event.state & self.CTRL_MASK)
 
+        y = self.timeline_canvas.canvasy(event.y)
+        if y < self.timeline_ruler_h and self.preview_active:
+            x = self.timeline_canvas.canvasx(event.x)
+            self.seek_preview_to(x / self.pixels_per_sec)
+
         if not iid:
             if not shift and not ctrl:
                 self.tree_cues.selection_set(())
@@ -1351,6 +1481,11 @@ class SmokeSyncGUI(tk.Tk):
         def _run():
             while not self._monitor_stop.is_set():
                 if self.engine and self.engine.running:
+                    time.sleep(1)
+                    continue
+                if getattr(self, "preview_active", False):
+                    # La vista previa local (libVLC embebido) ya reporta su
+                    # propia posicion; no pelear con el sondeo remoto.
                     time.sleep(1)
                     continue
                 if not self._player_configured():
