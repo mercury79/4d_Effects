@@ -197,6 +197,24 @@ class SmokeSyncGUI(tk.Tk):
                        '{"entity_id":"remote.broadlink","device":"maquina_humo","command":"humo_abierto"}',
                   foreground="#666", font=("", 8), wraplength=260).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
+        # -- MQTT directo (sin Home Assistant): publica On/Off al broker
+        # configurado en la pestaña Configuracion.
+        self.frame_dev_mqtt = ttk.LabelFrame(right, text="MQTT (broker en pestaña Configuracion)", padding=6)
+        self.var_dev_mqtt_on_topic = tk.StringVar()
+        self.var_dev_mqtt_on_payload = tk.StringVar(value="ON")
+        self.var_dev_mqtt_off_topic = tk.StringVar()
+        self.var_dev_mqtt_off_payload = tk.StringVar(value="OFF")
+        ttk.Label(self.frame_dev_mqtt, text="Topic ON").grid(row=0, column=0, sticky="w")
+        ttk.Entry(self.frame_dev_mqtt, textvariable=self.var_dev_mqtt_on_topic, width=24).grid(row=0, column=1, sticky="w", padx=4)
+        ttk.Label(self.frame_dev_mqtt, text="Payload ON").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(self.frame_dev_mqtt, textvariable=self.var_dev_mqtt_on_payload, width=24).grid(row=1, column=1, sticky="w", padx=4, pady=(4, 0))
+        ttk.Label(self.frame_dev_mqtt, text="Topic OFF").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(self.frame_dev_mqtt, textvariable=self.var_dev_mqtt_off_topic, width=24).grid(row=2, column=1, sticky="w", padx=4, pady=(6, 0))
+        ttk.Label(self.frame_dev_mqtt, text="Payload OFF").grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(self.frame_dev_mqtt, textvariable=self.var_dev_mqtt_off_payload, width=24).grid(row=3, column=1, sticky="w", padx=4, pady=(4, 0))
+        ttk.Label(self.frame_dev_mqtt, text='Ej: topic "shellyplug/relay/0/command",\npayload "on" / "off"',
+                  foreground="#666", font=("", 8)).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
         ttk.Label(right, text="Tipo de dispositivo").pack(anchor="w")
         kind_frame = ttk.Frame(right)
         kind_frame.pack(fill="x", pady=(0, 4))
@@ -206,10 +224,14 @@ class SmokeSyncGUI(tk.Tk):
                          value="multi_state", command=self._on_dev_kind_change).pack(anchor="w")
         ttk.Radiobutton(kind_frame, text="Escena (solo activar, sin apagado)", variable=self.var_dev_kind,
                          value="scene", command=self._on_dev_kind_change).pack(anchor="w")
+        ttk.Radiobutton(kind_frame, text="MQTT directo (sin Home Assistant)", variable=self.var_dev_kind,
+                         value="mqtt", command=self._on_dev_kind_change).pack(anchor="w")
         ttk.Label(right, text="Binario: se detecta on/off segun el dominio\n"
                               "(switch, light, cover, fan, input_boolean, valve).\n"
                               "Escena (scene.xxx): HA solo permite activarla,\n"
-                              "no tiene 'apagado' - se detecta automatico.",
+                              "no tiene 'apagado' - se detecta automatico.\n"
+                              "MQTT: publica directo al broker (configuralo en\n"
+                              "la pestaña Configuracion), sin pasar por HA.",
                   foreground="#666").pack(anchor="w", pady=(0, 8))
 
         # -- Editor de estados (solo visible/relevante si kind == multi_state)
@@ -268,20 +290,22 @@ class SmokeSyncGUI(tk.Tk):
 
     def _on_dev_kind_change(self):
         kind = self.var_dev_kind.get()
+        self.frame_states.pack_forget()
+        self.frame_dev_shortcut.pack_forget()
+        self.frame_dev_advanced_toggle.pack_forget()
+        self.frame_dev_advanced.pack_forget()
+        self.frame_dev_mqtt.pack_forget()
+
         if kind == "multi_state":
             self.frame_states.pack(fill="x", pady=(0, 8))
-            self.frame_dev_shortcut.pack_forget()
-            self.frame_dev_advanced_toggle.pack_forget()
-            self.frame_dev_advanced.pack_forget()
-        else:
-            self.frame_states.pack_forget()
-            self.frame_dev_shortcut.pack(fill="x", pady=(0, 8))
-            if kind == "binary":
-                self.frame_dev_advanced_toggle.pack(fill="x", pady=(0, 4))
-                self._on_dev_advanced_toggle()
-            else:
-                self.frame_dev_advanced_toggle.pack_forget()
-                self.frame_dev_advanced.pack_forget()
+            return
+
+        self.frame_dev_shortcut.pack(fill="x", pady=(0, 8))
+        if kind == "binary":
+            self.frame_dev_advanced_toggle.pack(fill="x", pady=(0, 4))
+            self._on_dev_advanced_toggle()
+        elif kind == "mqtt":
+            self.frame_dev_mqtt.pack(fill="x", pady=(0, 8))
 
     def _on_dev_advanced_toggle(self):
         if self.var_dev_advanced.get():
@@ -430,7 +454,9 @@ class SmokeSyncGUI(tk.Tk):
         self.var_cue_value = tk.StringVar()
 
         ttk.Label(form, text="Timestamp (HH:MM:SS)").grid(row=0, column=0, sticky="w")
-        ttk.Entry(form, textvariable=self.var_cue_t, width=12).grid(row=0, column=1, sticky="w", padx=4)
+        entry_cue_t = ttk.Entry(form, textvariable=self.var_cue_t, width=12)
+        entry_cue_t.grid(row=0, column=1, sticky="w", padx=4)
+        entry_cue_t.bind("<FocusOut>", self._on_cue_duration_change)
 
         ttk.Label(form, text="Dispositivo").grid(row=0, column=2, sticky="w")
         self.combo_cue_device = ttk.Combobox(form, textvariable=self.var_cue_device, width=14, state="readonly")
@@ -448,7 +474,13 @@ class SmokeSyncGUI(tk.Tk):
         self.var_cue_duration = tk.StringVar(value="3")
         self.entry_cue_duration = ttk.Entry(form, textvariable=self.var_cue_duration, width=10)
         self.entry_cue_duration.grid(row=2, column=1, sticky="w", padx=4, pady=(6, 0))
+        self.entry_cue_duration.bind("<FocusOut>", self._on_cue_duration_change)
         self.combo_cue_state = ttk.Combobox(form, textvariable=self.var_cue_value, width=10, state="readonly")
+
+        self.lbl_cue_end = ttk.Label(form, text="Fin (HH:MM:SS)")
+        self.var_cue_end = tk.StringVar()
+        self.entry_cue_end = ttk.Entry(form, textvariable=self.var_cue_end, width=12)
+        self.entry_cue_end.bind("<FocusOut>", self._on_cue_end_change)
 
         btns2 = ttk.Frame(form)
         btns2.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
@@ -485,11 +517,36 @@ class SmokeSyncGUI(tk.Tk):
         mode = self.var_cue_mode.get()
         self.entry_cue_duration.grid_remove()
         self.combo_cue_state.grid_remove()
+        self.lbl_cue_end.grid_remove()
+        self.entry_cue_end.grid_remove()
         if mode == "state":
             self.combo_cue_state.grid(row=2, column=1, sticky="w", padx=4, pady=(6, 0))
         elif mode == "burst":
             self.entry_cue_duration.grid(row=2, column=1, sticky="w", padx=4, pady=(6, 0))
+            self.lbl_cue_end.grid(row=2, column=2, sticky="w", padx=(12, 0), pady=(6, 0))
+            self.entry_cue_end.grid(row=2, column=3, sticky="w", padx=4, pady=(6, 0))
+            self._sync_cue_end_from_duration()
         # 'scene': ni duracion ni estado, solo dispara al llegar el timestamp
+
+    def _sync_cue_end_from_duration(self):
+        try:
+            start = core.parse_time(self.var_cue_t.get())
+            dur = float(self.var_cue_duration.get())
+        except (ValueError, Exception):
+            return
+        self.var_cue_end.set(core.fmt_time_ms(start + dur))
+
+    def _on_cue_duration_change(self, _event=None):
+        self._sync_cue_end_from_duration()
+
+    def _on_cue_end_change(self, _event=None):
+        try:
+            start = core.parse_time(self.var_cue_t.get())
+            end = core.parse_time(self.var_cue_end.get())
+        except Exception:
+            return
+        dur = max(0.2, end - start)
+        self.var_cue_duration.set(str(round(dur, 2)))
 
     def _refresh_sheet_list(self):
         self.list_sheets.delete(0, "end")
@@ -596,11 +653,11 @@ class SmokeSyncGUI(tk.Tk):
         self.var_cue_device.set(device)
         self._on_cue_device_change()
         self.var_cue_mode.set(modo)
-        self._on_cue_mode_change()
         if modo == "state":
             self.var_cue_value.set(valor)
         elif modo == "burst":
             self.var_cue_duration.set(str(valor).rstrip("s"))
+        self._on_cue_mode_change()
 
     def _delete_cue(self):
         sel = list(self.tree_cues.selection())
@@ -633,13 +690,12 @@ class SmokeSyncGUI(tk.Tk):
         self._delete_cue()
 
     def _use_current_title(self):
-        j = core.zidoo_status(self.cfg)
-        if j.get("_error"):
-            messagebox.showwarning("Sin conexion", f"No pude leer el Zidoo: {j['_error']}")
+        title, _pos, _playing, error = core.get_playback(self.cfg)
+        if error:
+            messagebox.showwarning("Sin conexion", f"No pude leer el reproductor: {error}")
             return
-        title, _pos, _playing = core.parse_playback(j)
         if not title:
-            messagebox.showinfo("Sin titulo", "El Zidoo no reporta un titulo en este momento.")
+            messagebox.showinfo("Sin titulo", "El reproductor no reporta un titulo en este momento.")
             return
         self.var_sheet_match.set(title)
         if not self.var_sheet_filename.get() or self.var_sheet_filename.get() == "nuevo_cue_sheet.json":
@@ -1132,37 +1188,102 @@ class SmokeSyncGUI(tk.Tk):
 
     # -- Tab: Configuracion --------------------------------------------------
     def _build_config_tab(self):
-        f = ttk.Frame(self.tab_config, padding=14)
-        f.pack(fill="both", expand=True)
+        outer = ttk.Frame(self.tab_config)
+        outer.pack(fill="both", expand=True)
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+        f = ttk.Frame(canvas, padding=14)
+        canvas.create_window((0, 0), window=f, anchor="nw")
+        f.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
         self.vars = {}
 
-        def row(label, key, r, width=28):
-            ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=4)
+        def row(parent, label, key, r, width=28):
+            ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w", pady=4)
             v = tk.StringVar(value=str(self.cfg.get(key, "")))
-            ttk.Entry(f, textvariable=v, width=width).grid(row=r, column=1, sticky="w", pady=4)
+            ttk.Entry(parent, textvariable=v, width=width).grid(row=r, column=1, sticky="w", pady=4, padx=4)
             self.vars[key] = v
+            return v
 
-        ttk.Label(f, text="Zidoo X20 Pro", font=("", 11, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 6))
-        row("IP", "zidoo_ip", 1)
-        row("Puerto API", "zidoo_port", 2)
+        # -- Reproductor (fuente de titulo/posicion) -------------------------
+        player_frame = ttk.LabelFrame(f, text="Reproductor (fuente de titulo/posicion)", padding=10)
+        player_frame.pack(fill="x", pady=(0, 10))
+        type_row = ttk.Frame(player_frame)
+        type_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(type_row, text="Tipo:").pack(side="left")
+        self.var_player_type = tk.StringVar(value=self.cfg.get("player_type", "zidoo"))
+        self.vars["player_type"] = self.var_player_type
+        combo_player = ttk.Combobox(type_row, textvariable=self.var_player_type, state="readonly",
+                                     values=["zidoo", "vlc", "jriver"], width=10)
+        combo_player.pack(side="left", padx=6)
+        combo_player.bind("<<ComboboxSelected>>", lambda e: self._on_player_type_change())
 
-        ttk.Label(f, text="Home Assistant", font=("", 11, "bold")).grid(row=3, column=0, sticky="w", pady=(14, 6))
-        row("URL (ej http://192.168.1.50:8123)", "ha_url", 4)
-        row("Long-Lived Access Token", "ha_token", 5)
+        self.frame_player_zidoo = ttk.Frame(player_frame)
+        row(self.frame_player_zidoo, "IP", "zidoo_ip", 0)
+        row(self.frame_player_zidoo, "Puerto API", "zidoo_port", 1)
 
-        ttk.Label(f, text="Sincronizacion", font=("", 11, "bold")).grid(row=6, column=0, sticky="w", pady=(14, 6))
-        row("Lead time por defecto (s)", "lead_time_s", 7)
-        row("Duracion por defecto (s)", "default_duration_s", 8)
-        row("Intervalo de sondeo (s)", "poll_interval_s", 9)
-        row("Ventana max. de retraso (s)", "max_late_s", 10)
+        self.frame_player_vlc = ttk.Frame(player_frame)
+        row(self.frame_player_vlc, "URL (ej http://127.0.0.1:8080)", "vlc_url", 0, width=32)
+        row(self.frame_player_vlc, "Password (Preferencias > Interfaz > Web)", "vlc_password", 1, width=32)
+        ttk.Label(self.frame_player_vlc,
+                  text="Activa 'Interfaz web' en VLC (Preferencias > Interfaz >\n"
+                       "Principales > Web) y define un password ahi mismo.",
+                  foreground="#666", font=("", 8)).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        ttk.Label(f, text="Cue sheets", font=("", 11, "bold")).grid(row=11, column=0, sticky="w", pady=(14, 6))
-        row("Carpeta de cue sheets", "cues_dir", 12, width=40)
-        ttk.Button(f, text="Elegir carpeta...", command=self._pick_cues_dir).grid(row=12, column=2, padx=6)
+        self.frame_player_jriver = ttk.Frame(player_frame)
+        row(self.frame_player_jriver, "URL MCWS (ej http://127.0.0.1:52199)", "jriver_url", 0, width=32)
+        row(self.frame_player_jriver, "Usuario (si tiene Access Control)", "jriver_user", 1, width=32)
+        row(self.frame_player_jriver, "Password", "jriver_password", 2, width=32)
 
-        ttk.Button(f, text="Guardar configuracion", command=self.save_settings).grid(
-            row=13, column=0, columnspan=2, sticky="w", pady=(18, 0))
+        self._on_player_type_change()
+
+        # -- Home Assistant ---------------------------------------------------
+        ha_frame = ttk.LabelFrame(f, text="Home Assistant", padding=10)
+        ha_frame.pack(fill="x", pady=(0, 10))
+        row(ha_frame, "URL (ej http://192.168.1.50:8123)", "ha_url", 0, width=32)
+        row(ha_frame, "Long-Lived Access Token", "ha_token", 1, width=32)
+
+        # -- MQTT (dispositivos sin pasar por HA) ------------------------------
+        mqtt_frame = ttk.LabelFrame(f, text="MQTT (opcional - dispositivos directos, sin Home Assistant)", padding=10)
+        mqtt_frame.pack(fill="x", pady=(0, 10))
+        row(mqtt_frame, "Host del broker", "mqtt_host", 0, width=28)
+        row(mqtt_frame, "Puerto", "mqtt_port", 1, width=10)
+        row(mqtt_frame, "Usuario (opcional)", "mqtt_user", 2, width=28)
+        row(mqtt_frame, "Password (opcional)", "mqtt_password", 3, width=28)
+        ttk.Label(mqtt_frame, text="Requiere 'pip install paho-mqtt'. Util para probar\n"
+                                   "estrobos/Shelly directo, sin depender de HA.",
+                  foreground="#666", font=("", 8)).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        # -- Sincronizacion -----------------------------------------------------
+        sync_frame = ttk.LabelFrame(f, text="Sincronizacion", padding=10)
+        sync_frame.pack(fill="x", pady=(0, 10))
+        row(sync_frame, "Lead time por defecto (s)", "lead_time_s", 0, width=10)
+        row(sync_frame, "Duracion por defecto (s)", "default_duration_s", 1, width=10)
+        row(sync_frame, "Intervalo de sondeo (s)", "poll_interval_s", 2, width=10)
+        row(sync_frame, "Ventana max. de retraso (s)", "max_late_s", 3, width=10)
+
+        # -- Cue sheets -----------------------------------------------------
+        cues_frame = ttk.LabelFrame(f, text="Cue sheets", padding=10)
+        cues_frame.pack(fill="x", pady=(0, 10))
+        row(cues_frame, "Carpeta de cue sheets", "cues_dir", 0, width=40)
+        ttk.Button(cues_frame, text="Elegir carpeta...", command=self._pick_cues_dir).grid(row=0, column=2, padx=6)
+
+        ttk.Button(f, text="Guardar configuracion", command=self.save_settings).pack(anchor="w", pady=(6, 0))
+
+    def _on_player_type_change(self):
+        ptype = self.var_player_type.get()
+        self.frame_player_zidoo.pack_forget()
+        self.frame_player_vlc.pack_forget()
+        self.frame_player_jriver.pack_forget()
+        if ptype == "vlc":
+            self.frame_player_vlc.pack(fill="x")
+        elif ptype == "jriver":
+            self.frame_player_jriver.pack(fill="x")
+        else:
+            self.frame_player_zidoo.pack(fill="x")
 
     def _pick_cues_dir(self):
         d = filedialog.askdirectory()
@@ -1189,13 +1310,14 @@ class SmokeSyncGUI(tk.Tk):
         try:
             while True:
                 title, pos, playing, sheet, error = self.state_queue.get_nowait()
+                ptype = self.cfg.get("player_type", "zidoo").upper()
                 if error:
-                    self.lbl_zidoo.config(text=f"Zidoo: ERROR ({error})", foreground="red")
+                    self.lbl_zidoo.config(text=f"{ptype}: ERROR ({error})", foreground="red")
                     continue
                 self.lbl_title.config(text=f"Titulo: {title or '-'}")
                 self.lbl_pos.config(text=f"Posicion: {core.fmt_time(pos or 0)}  (reproduciendo: {playing})")
                 self.lbl_sheet.config(text=f"Cue sheet: {sheet['_file'] if sheet else '(ninguna)'}")
-                self.lbl_zidoo.config(text="Zidoo: OK", foreground="green")
+                self.lbl_zidoo.config(text=f"{ptype}: OK", foreground="green")
                 self.last_title = title
                 self.last_pos = pos
                 if hasattr(self, "lbl_capture_pos"):
@@ -1215,22 +1337,29 @@ class SmokeSyncGUI(tk.Tk):
             pass
         self.after(200, self._poll_status_queue)
 
+    def _player_configured(self):
+        ptype = self.cfg.get("player_type", "zidoo")
+        if ptype == "vlc":
+            return bool(self.cfg.get("vlc_url"))
+        if ptype == "jriver":
+            return bool(self.cfg.get("jriver_url"))
+        return bool(self.cfg.get("zidoo_ip"))
+
     def _start_monitor(self):
-        """Sondea el Zidoo continuamente para que la posicion avance en
+        """Sondea el reproductor continuamente para que la posicion avance en
         pantalla aunque la sincronizacion (disparo de cues) no este activa."""
         def _run():
             while not self._monitor_stop.is_set():
                 if self.engine and self.engine.running:
                     time.sleep(1)
                     continue
-                if not self.cfg.get("zidoo_ip"):
+                if not self._player_configured():
                     time.sleep(1)
                     continue
-                j = core.zidoo_status(self.cfg)
-                if j.get("_error"):
-                    self.state_queue.put((None, None, False, None, j["_error"]))
+                title, pos, playing, error = core.get_playback(self.cfg)
+                if error:
+                    self.state_queue.put((None, None, False, None, error))
                 else:
-                    title, pos, playing = core.parse_playback(j)
                     sheets = core.load_cue_sheets(self.cfg, log=lambda *_: None)
                     sheet = core.match_sheet(sheets, title) if title else None
                     self.state_queue.put((title, pos, playing, sheet, None))
@@ -1248,6 +1377,8 @@ class SmokeSyncGUI(tk.Tk):
                 atajo = d.get("shortcut", "")
                 if d.get("kind") == "scene":
                     detalle = f"activar: {d.get('activate_service', 'scene/turn_on')}"
+                elif d.get("kind") == "mqtt":
+                    detalle = f"mqtt: {d.get('on_topic', '')} / {d.get('off_topic', '')}"
                 else:
                     detalle = f"{d.get('on_service', '')} / {d.get('off_service', '')}"
             estado = self.device_status.get(d["name"], "") if hasattr(self, "device_status") else ""
@@ -1318,6 +1449,11 @@ class SmokeSyncGUI(tk.Tk):
             self.var_dev_off_service.set(device.get("off_service", ""))
             self.var_dev_on_data.set(json.dumps(device.get("on_data") or simple_data))
             self.var_dev_off_data.set(json.dumps(device.get("off_data") or simple_data))
+        if device.get("kind") == "mqtt":
+            self.var_dev_mqtt_on_topic.set(device.get("on_topic", ""))
+            self.var_dev_mqtt_on_payload.set(device.get("on_payload", "ON"))
+            self.var_dev_mqtt_off_topic.set(device.get("off_topic", ""))
+            self.var_dev_mqtt_off_payload.set(device.get("off_payload", "OFF"))
         self._on_dev_kind_change()
         self._refresh_test_state_options(device)
 
@@ -1326,11 +1462,21 @@ class SmokeSyncGUI(tk.Tk):
         entity = self.var_dev_entity.get().strip()
         kind = self.var_dev_kind.get()
         shortcut = self.var_dev_shortcut.get().strip()
-        if not name or not entity:
+        if not name or (kind != "mqtt" and not entity):
             messagebox.showwarning("Falta informacion", "Nombre y entity_id son requeridos.")
             return
 
-        if kind == "multi_state":
+        if kind == "mqtt":
+            on_topic = self.var_dev_mqtt_on_topic.get().strip()
+            off_topic = self.var_dev_mqtt_off_topic.get().strip()
+            if not on_topic or not off_topic:
+                messagebox.showwarning("Falta informacion", "Topic ON y Topic OFF son requeridos.")
+                return
+            device = {"name": name, "kind": "mqtt", "entity_id": entity,
+                      "on_topic": on_topic, "on_payload": self.var_dev_mqtt_on_payload.get(),
+                      "off_topic": off_topic, "off_payload": self.var_dev_mqtt_off_payload.get(),
+                      "shortcut": shortcut}
+        elif kind == "multi_state":
             states = {}
             for iid in self.tree_states.get_children():
                 st_name, service, data, st_shortcut = self.tree_states.item(iid, "values")
@@ -1418,6 +1564,9 @@ class SmokeSyncGUI(tk.Tk):
         elif device.get("kind") == "scene":
             self.log(f"Probando '{device['name']}' -> activar escena...")
             core.activate_scene_async(self.cfg, device, log=self.log, on_done=on_done)
+        elif device.get("kind") == "mqtt":
+            self.log(f"Probando '{device['name']}' (MQTT {device['on_topic']})...")
+            core.fire_mqtt_device_async(self.cfg, device, 2.0, log=self.log, on_done=on_done)
         else:
             self.log(f"Probando '{device['name']}' ({device['entity_id']})...")
             core.fire_device_async(self.cfg, device, 2.0, log=self.log, on_done=on_done)
@@ -1433,7 +1582,7 @@ class SmokeSyncGUI(tk.Tk):
     def save_settings(self):
         for key, var in self.vars.items():
             val = var.get().strip()
-            if key in ("zidoo_port",):
+            if key in ("zidoo_port", "mqtt_port"):
                 val = int(val) if val else core.DEFAULT_CFG[key]
             elif key in ("lead_time_s", "default_duration_s", "poll_interval_s", "max_late_s"):
                 val = float(val) if val else core.DEFAULT_CFG[key]
@@ -1443,12 +1592,12 @@ class SmokeSyncGUI(tk.Tk):
         messagebox.showinfo("SmokeSync", "Configuracion guardada.")
 
     def test_connections(self):
-        j = core.zidoo_status(self.cfg)
-        if j.get("_error"):
-            self.lbl_zidoo.config(text=f"Zidoo: ERROR ({j['_error']})", foreground="red")
+        title, pos, playing, error = core.get_playback(self.cfg)
+        ptype = self.cfg.get("player_type", "zidoo").upper()
+        if error:
+            self.lbl_zidoo.config(text=f"{ptype}: ERROR ({error})", foreground="red")
         else:
-            title, pos, playing = core.parse_playback(j)
-            self.lbl_zidoo.config(text="Zidoo: OK", foreground="green")
+            self.lbl_zidoo.config(text=f"{ptype}: OK", foreground="green")
             if title:
                 self.lbl_title.config(text=f"Titulo: {title}")
                 self.lbl_pos.config(text=f"Posicion: {core.fmt_time(pos or 0)}  (reproduciendo: {playing})")

@@ -28,9 +28,15 @@ Conceptos:
 import json
 import threading
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import requests
+
+try:
+    import paho.mqtt.publish as mqtt_publish_mod
+except ImportError:
+    mqtt_publish_mod = None
 
 CONFIG_DIR = Path.home() / ".smokesync"
 CONFIG_PATH = CONFIG_DIR / "config.json"
@@ -46,10 +52,20 @@ DOMAIN_SERVICES = {
 }
 
 DEFAULT_CFG = {
+    "player_type": "zidoo",  # zidoo | vlc | jriver
     "zidoo_ip": "",
     "zidoo_port": 9529,
+    "vlc_url": "http://127.0.0.1:8080",
+    "vlc_password": "",
+    "jriver_url": "http://127.0.0.1:52199",
+    "jriver_user": "",
+    "jriver_password": "",
     "ha_url": "",
     "ha_token": "",
+    "mqtt_host": "",
+    "mqtt_port": 1883,
+    "mqtt_user": "",
+    "mqtt_password": "",
     "lead_time_s": 4,
     "default_duration_s": 3,
     "poll_interval_s": 0.5,
@@ -175,6 +191,60 @@ def parse_playback(j):
     return (title or path), pos_s, is_playing
 
 
+# --- VLC ---------------------------------------------------------------------
+def vlc_playback(cfg):
+    """Lee estado via la interfaz HTTP de VLC (Preferencias > Interfaz > Web,
+    con un password configurado). Devuelve (title, pos_s, playing, error)."""
+    url = f"{cfg['vlc_url'].rstrip('/')}/requests/status.json"
+    try:
+        r = requests.get(url, auth=("", cfg.get("vlc_password", "")), timeout=3)
+        r.raise_for_status()
+        j = r.json()
+    except Exception as e:
+        return None, None, False, str(e)
+    meta = (j.get("information", {}) or {}).get("category", {}).get("meta", {}) or {}
+    title = meta.get("title") or meta.get("filename") or ""
+    pos = j.get("time")
+    playing = j.get("state") == "playing"
+    return (title or None), (float(pos) if pos is not None else None), playing, None
+
+
+# --- JRiver Media Center (MCWS) -----------------------------------------------
+def jriver_playback(cfg):
+    """Lee estado via la Media Center Web Service (MCWS) de JRiver.
+    Devuelve (title, pos_s, playing, error)."""
+    url = f"{cfg['jriver_url'].rstrip('/')}/MCWS/v1/Playback/Info"
+    auth = (cfg.get("jriver_user") or None, cfg.get("jriver_password") or None)
+    try:
+        r = requests.get(url, auth=auth if auth[0] else None, timeout=3)
+        r.raise_for_status()
+        root = ET.fromstring(r.text)
+        fields = {item.get("Name"): (item.text or "") for item in root.findall("Item")}
+    except Exception as e:
+        return None, None, False, str(e)
+    title = fields.get("Filename") or fields.get("Name") or ""
+    pos_ms = fields.get("PositionMS")
+    pos = float(pos_ms) / 1000.0 if pos_ms else None
+    # MCWS: State 0=detenido, 1=pausado, 2=reproduciendo
+    playing = fields.get("State") == "2"
+    return (title or None), pos, playing, None
+
+
+def get_playback(cfg):
+    """Punto unico de lectura de reproduccion: despacha al backend elegido en
+    cfg['player_type'] (zidoo/vlc/jriver). Devuelve (title, pos_s, playing, error)."""
+    ptype = cfg.get("player_type", "zidoo")
+    if ptype == "vlc":
+        return vlc_playback(cfg)
+    if ptype == "jriver":
+        return jriver_playback(cfg)
+    j = zidoo_status(cfg)
+    if j.get("_error"):
+        return None, None, False, j["_error"]
+    title, pos, playing = parse_playback(j)
+    return title, pos, playing, None
+
+
 # --- Home Assistant ----------------------------------------------------------
 def ha_headers(cfg):
     return {"Authorization": f"Bearer {cfg['ha_token']}",
@@ -274,6 +344,42 @@ def activate_scene_async(cfg, device, log=print, on_done=None):
     def _run():
         ok = ha_call(cfg, service, device["entity_id"], log)
         detail = "escena activada" if ok else "fallo al activar escena"
+        if on_done:
+            on_done(ok, detail)
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
+
+
+# --- MQTT directo (sin pasar por Home Assistant) ------------------------------
+def mqtt_publish(cfg, topic, payload, log=print):
+    """Publica un mensaje MQTT directo al broker configurado (para probar
+    dispositivos - ej. Shelly, estrobos - sin depender de Home Assistant).
+    Conexion efimera: conecta, publica, desconecta."""
+    if mqtt_publish_mod is None:
+        log("  [MQTT] falta el paquete 'paho-mqtt'. Instala con: pip install paho-mqtt")
+        return False
+    auth = None
+    if cfg.get("mqtt_user"):
+        auth = {"username": cfg["mqtt_user"], "password": cfg.get("mqtt_password", "")}
+    try:
+        mqtt_publish_mod.single(topic, payload=payload, hostname=cfg.get("mqtt_host", ""),
+                                 port=int(cfg.get("mqtt_port", 1883)), auth=auth)
+        return True
+    except Exception as e:
+        log(f"  [MQTT] fallo al publicar en '{topic}': {e}")
+        return False
+
+
+def fire_mqtt_device_async(cfg, device, duration, log=print, on_done=None):
+    """Para dispositivos kind=mqtt: publica el payload ON, espera 'duration'
+    y publica el payload OFF. on_done(ok, detail) reporta el resultado."""
+    def _run():
+        ok1 = mqtt_publish(cfg, device["on_topic"], device.get("on_payload", "ON"), log)
+        time.sleep(duration)
+        ok2 = mqtt_publish(cfg, device["off_topic"], device.get("off_payload", "OFF"), log)
+        ok = ok1 and ok2
+        detail = f"burst mqtt {duration}s" if ok else "fallo burst mqtt"
         if on_done:
             on_done(ok, detail)
     t = threading.Thread(target=_run, daemon=True)
@@ -400,7 +506,8 @@ class SyncEngine:
     def _loop(self):
         cfg = self.cfg
         sheets = load_cue_sheets(cfg, self.log)
-        self.log(f"Cargados {len(sheets)} cue sheet(s). Vigilando el Zidoo...")
+        self.log(f"Cargados {len(sheets)} cue sheet(s). Vigilando "
+                 f"'{cfg.get('player_type', 'zidoo')}'...")
 
         active_title = None
         active_sheet = None
@@ -409,7 +516,7 @@ class SyncEngine:
 
         while not self._stop.is_set():
             try:
-                title, pos, playing = parse_playback(zidoo_status(cfg))
+                title, pos, playing, _error = get_playback(cfg)
                 self.on_state(title=title, pos=pos, playing=playing,
                               sheet=active_sheet)
 
@@ -480,6 +587,11 @@ class SyncEngine:
                                 self.log(f"[{fmt_time(pos)}] {device['name'].upper()} -> "
                                          f"activar escena (cue {fmt_time(parse_time(cue['t']))})")
                                 activate_scene_async(cfg, device, self.log)
+                            elif device.get("kind") == "mqtt":
+                                dur = float(cue.get("duration_s", cfg["default_duration_s"]))
+                                self.log(f"[{fmt_time(pos)}] {device['name'].upper()} -> "
+                                         f"cue mqtt {fmt_time(parse_time(cue['t']))} ({dur}s)")
+                                fire_mqtt_device_async(cfg, device, dur, self.log)
                             else:
                                 dur = float(cue.get("duration_s", cfg["default_duration_s"]))
                                 self.log(f"[{fmt_time(pos)}] {device['name'].upper()} -> "
