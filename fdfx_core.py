@@ -1,8 +1,8 @@
 """
-SmokeSync - Core
+4DFX - Core
 
-Logica compartida entre la CLI (smokesync.py) y la interfaz grafica
-(smokesync_gui.py). No depende de tkinter ni de ningun frontend: solo de
+Logica compartida entre la CLI (4dfx.py) y la interfaz grafica
+(fdfx_gui.py). No depende de tkinter ni de ningun frontend: solo de
 'requests' de la libreria estandar, para que corra igual en macOS, Windows
 y Raspberry Pi 4.
 
@@ -26,6 +26,10 @@ Conceptos:
 """
 
 import json
+import shutil
+import socket
+import subprocess
+import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -38,8 +42,20 @@ try:
 except ImportError:
     mqtt_publish_mod = None
 
-CONFIG_DIR = Path.home() / ".smokesync"
+CONFIG_DIR = Path.home() / ".4dfx"
 CONFIG_PATH = CONFIG_DIR / "config.json"
+_OLD_CONFIG_DIR = Path.home() / ".smokesync"
+
+
+def _migrate_old_config_dir():
+    """Si existe la carpeta de config del nombre anterior (SmokeSync) y la
+    nueva (.4dfx) todavia no, la renombramos para no perder la configuracion,
+    dispositivos y cue sheets ya guardados."""
+    if _OLD_CONFIG_DIR.exists() and not CONFIG_DIR.exists():
+        _OLD_CONFIG_DIR.rename(CONFIG_DIR)
+
+
+_migrate_old_config_dir()
 
 # Mapeo dominio de entidad HA -> servicios on/off (control binario)
 DOMAIN_SERVICES = {
@@ -66,7 +82,7 @@ DEFAULT_CFG = {
     "mqtt_port": 1883,
     "mqtt_user": "",
     "mqtt_password": "",
-    "lead_time_s": 4,
+    "lead_time_s": 0,
     "default_duration_s": 3,
     "poll_interval_s": 0.5,
     "max_late_s": 3.0,
@@ -230,6 +246,128 @@ def jriver_playback(cfg):
     return (title or None), pos, playing, None
 
 
+def vlc_control(cfg, command, **params):
+    """Envia un comando a la interfaz HTTP de VLC (play/pause/seek/in_play...).
+    Ver https://wiki.videolan.org/VLC_HTTP_requests/"""
+    url = f"{cfg['vlc_url'].rstrip('/')}/requests/status.json"
+    q = {"command": command, **params}
+    try:
+        r = requests.get(url, params=q, auth=("", cfg.get("vlc_password", "")), timeout=3)
+        r.raise_for_status()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+_VIDEO_EXTENSIONS = (".mp4", ".mkv", ".mov", ".avi", ".m4v", ".ts", ".m2ts", ".wmv")
+
+
+def strip_video_ext(title):
+    """Quita la extension de video al final del titulo si la trae (algunos
+    reproductores reportan el nombre de archivo completo, otros no) - asi
+    'Pelicula.mp4' y 'Pelicula' generan siempre el mismo match/slug de cue
+    sheet en vez de crear dos archivos distintos para el mismo video."""
+    for ext in _VIDEO_EXTENSIONS:
+        if title.lower().endswith(ext):
+            return title[: -len(ext)]
+    return title
+
+
+def slug_for_title(title):
+    clean = strip_video_ext(title)
+    return "".join(c if c.isalnum() else "_" for c in clean.lower()).strip("_")
+
+
+def local_ip():
+    """IP de esta maquina en la red local (util para configurar Shelly/HA/
+    MQTT apuntando aqui). No abre conexion real, solo usa el truco UDP para
+    que el SO resuelva que interfaz usaria."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def find_vlc_binary():
+    """Ubica el ejecutable de VLC segun la plataforma. Devuelve None si no se encuentra."""
+    if sys.platform == "darwin":
+        candidates = ["/Applications/VLC.app/Contents/MacOS/VLC"]
+    elif sys.platform == "win32":
+        candidates = [
+            r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+            r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
+        ]
+    else:
+        candidates = ["/usr/bin/vlc", "/usr/local/bin/vlc"]
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    found = shutil.which("vlc")
+    return found
+
+
+def launch_vlc_with_file(cfg, path):
+    """Lanza VLC (ventana propia, no embebida) con el archivo dado y su
+    interfaz HTTP activada, usando vlc_url/vlc_password de cfg para poder
+    monitorear/controlar la reproduccion despues. Devuelve (ok, error_msg)."""
+    binary = find_vlc_binary()
+    if not binary:
+        return False, "No se encontro el ejecutable de VLC en esta maquina."
+    try:
+        port = cfg["vlc_url"].rsplit(":", 1)[-1]
+        int(port)
+    except (KeyError, ValueError):
+        port = "8080"
+    args = [
+        binary, path,
+        "--extraintf", "http",
+        # 0.0.0.0 en vez de 127.0.0.1: si vlc_url usa la IP de la red local
+        # (en vez de localhost), VLC debe escuchar ahi tambien, no solo en
+        # loopback, o la app no podra conectarse (Connection refused).
+        "--http-host", "0.0.0.0",
+        "--http-port", str(port),
+        "--http-password", cfg.get("vlc_password", "") or "4dfx",
+        # Mantiene la ventana de VLC siempre visible aunque la app tenga el
+        # foco (son procesos/ventanas separados; sin esto, VLC se va detras
+        # al hacer clic en la app).
+        "--video-on-top",
+    ]
+    if not cfg.get("vlc_password"):
+        cfg["vlc_password"] = "4dfx"
+    try:
+        subprocess.Popen(args)
+        if sys.platform == "darwin":
+            threading.Timer(2.0, _position_vlc_window_macos).start()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _position_vlc_window_macos(x=760, y=60, w=760, h=480):
+    """Mueve/redimensiona la ventana de VLC a un lugar fijo, para no tener
+    que acomodarla a mano cada vez que se abre un video para editar cues.
+    Usa System Events (requiere dar permiso de Accesibilidad la primera vez
+    a la Terminal/app que corre esto, en Ajustes > Privacidad y Seguridad)."""
+    script = (
+        'tell application "VLC" to activate\n'
+        'delay 0.3\n'
+        'tell application "System Events"\n'
+        '  tell process "VLC"\n'
+        f'    set position of front window to {{{x}, {y}}}\n'
+        f'    set size of front window to {{{w}, {h}}}\n'
+        '  end tell\n'
+        'end tell\n'
+    )
+    try:
+        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
 def get_playback(cfg):
     """Punto unico de lectura de reproduccion: despacha al backend elegido en
     cfg['player_type'] (zidoo/vlc/jriver). Devuelve (title, pos_s, playing, error)."""
@@ -371,6 +509,38 @@ def mqtt_publish(cfg, topic, payload, log=print):
         return False
 
 
+def fire_binary_side_async(cfg, device, side, log=print, on_done=None):
+    """Dispara solo un lado (on/off) de un dispositivo binary, sin esperar ni
+    apagar despues. Util para probar el payload de apagado de forma
+    independiente (ej. confirmar que 'off' realmente apaga un estrobo)."""
+    def _run():
+        service = device["on_service"] if side == "on" else device["off_service"]
+        data = device.get(f"{side}_data") or {"entity_id": device.get("entity_id")}
+        ok = ha_call_service(cfg, service, data, log)
+        detail = f"{side} enviado" if ok else f"fallo {side}"
+        if on_done:
+            on_done(ok, detail)
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
+
+
+def fire_mqtt_side_async(cfg, device, side, log=print, on_done=None):
+    """Dispara solo un lado (on/off) de un dispositivo mqtt, sin esperar ni
+    apagar despues. Util para probar el payload de apagado de forma
+    independiente (ej. confirmar que 'off' realmente apaga un estrobo)."""
+    def _run():
+        topic = device[f"{side}_topic"]
+        payload = device.get(f"{side}_payload", side.upper())
+        ok = mqtt_publish(cfg, topic, payload, log)
+        detail = f"{side} enviado" if ok else f"fallo {side}"
+        if on_done:
+            on_done(ok, detail)
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
+
+
 def fire_mqtt_device_async(cfg, device, duration, log=print, on_done=None):
     """Para dispositivos kind=mqtt: publica el payload ON, espera 'duration'
     y publica el payload OFF. on_done(ok, detail) reporta el resultado."""
@@ -450,8 +620,16 @@ def import_state_txt(path, device_name):
     return cues
 
 
-def fire_at(sheet, cue, cfg):
-    lead = float(sheet.get("lead_time_s", cfg["lead_time_s"]))
+def fire_at(sheet, cue, cfg, device=None):
+    """Momento real en que se dispara el cue, restando el lead time para
+    compensar el lag de reaccion del hardware. Prioridad: lead_time_s del
+    dispositivo (cada uno puede tener un lag distinto, ej. un estrobo
+    reacciona distinto a una maquina de humo) > el de la cue sheet > el
+    global de la configuracion."""
+    if device is not None and device.get("lead_time_s") not in (None, ""):
+        lead = float(device["lead_time_s"])
+    else:
+        lead = float(sheet.get("lead_time_s", cfg["lead_time_s"]))
     return max(0.0, parse_time(cue["t"]) - lead)
 
 
@@ -487,6 +665,7 @@ class SyncEngine:
         self.log = log
         self.on_state = on_state or (lambda **kw: None)
         self._stop = threading.Event()
+        self._refresh = threading.Event()
         self._thread = None
 
     @property
@@ -503,6 +682,13 @@ class SyncEngine:
     def stop(self):
         self._stop.set()
 
+    def refresh_sheets(self):
+        """Fuerza a releer las cue sheets de disco y re-evaluar cual aplica
+        al titulo actual, sin esperar a que el titulo cambie. Util cuando el
+        usuario guarda/edita la cue sheet del video que ya esta reproduciendo
+        (si no, el motor se queda con el 'sin cue sheet' que vio al arrancar)."""
+        self._refresh.set()
+
     def _loop(self):
         cfg = self.cfg
         sheets = load_cue_sheets(cfg, self.log)
@@ -516,6 +702,18 @@ class SyncEngine:
 
         while not self._stop.is_set():
             try:
+                if self._refresh.is_set():
+                    self._refresh.clear()
+                    sheets = load_cue_sheets(cfg, self.log)
+                    active_sheet = match_sheet(sheets, active_title) if active_title else None
+                    fired = set()
+                    last_pos = -1
+                    if active_sheet:
+                        self.log(f">> cue sheet recargada: {active_sheet['_file']} "
+                                 f"({len(active_sheet.get('cues', []))} cues)")
+                    else:
+                        self.log(">> cue sheets recargadas, sigue sin haber match para el titulo actual.")
+
                 title, pos, playing, _error = get_playback(cfg)
                 self.on_state(title=title, pos=pos, playing=playing,
                               sheet=active_sheet)
@@ -534,7 +732,8 @@ class SyncEngine:
                         self.log(f">> '{title}' -> cues: {active_sheet['_file']} "
                                  f"({len(active_sheet.get('cues', []))} cues)")
                         for cue in active_sheet.get("cues", []):
-                            t_fire = fire_at(active_sheet, cue, cfg)
+                            dev = get_device(cfg, cue.get("device") or (default_device(cfg) or {}).get("name"))
+                            t_fire = fire_at(active_sheet, cue, cfg, dev)
                             self.log(f"     cue {fmt_time(parse_time(cue['t']))} "
                                      f"({cue.get('device', '?')}) -> dispara en ventana "
                                      f"[{fmt_time(t_fire)}, {fmt_time(t_fire + cfg['max_late_s'])})")
@@ -542,9 +741,13 @@ class SyncEngine:
                         self.log(f">> '{title}' sin cue sheet.")
 
                 if playing and active_sheet and pos is not None:
+                    def _dev_for(cue):
+                        return get_device(cfg, cue.get("device") or (default_device(cfg) or {}).get("name"))
+
                     if pos + 1 < last_pos:
                         fired = {i for i in fired
-                                 if fire_at(active_sheet, active_sheet["cues"][i], cfg) < pos}
+                                 if fire_at(active_sheet, active_sheet["cues"][i], cfg,
+                                            _dev_for(active_sheet["cues"][i])) < pos}
                     last_pos = pos
 
                     cues = active_sheet.get("cues", [])
@@ -556,7 +759,7 @@ class SyncEngine:
                     for i, cue in enumerate(cues):
                         if i in fired or "state" not in cue:
                             continue
-                        t_fire = fire_at(active_sheet, cue, cfg)
+                        t_fire = fire_at(active_sheet, cue, cfg, _dev_for(cue))
                         if pos >= t_fire + cfg["max_late_s"]:
                             dev_name = cue.get("device") or (default_device(cfg) or {}).get("name")
                             last_skipped_by_device[dev_name] = i
@@ -564,10 +767,11 @@ class SyncEngine:
                     for i, cue in enumerate(cues):
                         if i in fired:
                             continue
-                        t_fire = fire_at(active_sheet, cue, cfg)
+                        dev_name = cue.get("device") or (default_device(cfg) or {}).get("name")
+                        device = get_device(cfg, dev_name)
+                        t_fire = fire_at(active_sheet, cue, cfg, device)
                         is_state_cue = "state" in cue
                         in_window = t_fire <= pos < t_fire + cfg["max_late_s"]
-                        dev_name = cue.get("device") or (default_device(cfg) or {}).get("name")
                         # Los cues de 'state' (ventiladores/luces multi-estado) se
                         # "alcanzan" aunque el usuario haya adelantado rapido y ya
                         # se haya salido de la ventana normal: el estado debe
@@ -576,7 +780,6 @@ class SyncEngine:
                         catch_up = (is_state_cue and pos >= t_fire + cfg["max_late_s"]
                                     and last_skipped_by_device.get(dev_name) == i)
                         if in_window or catch_up:
-                            device = get_device(cfg, dev_name)
                             if not device:
                                 self.log(f"[{fmt_time(pos)}] cue sin device valido ('{dev_name}')")
                             elif is_state_cue:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SmokeSync - Sincroniza dispositivos (maquina de humo, agua, luces, estrobos...)
+4DFX - Sincroniza dispositivos (maquina de humo, agua, luces, estrobos...)
 via Home Assistant con los timestamps de cues de peliculas/conciertos
 reproducidos en un Zidoo X20 Pro.
 
@@ -9,11 +9,11 @@ dependencia de HA local: solo necesita alcanzar el Zidoo (API HTTP :9529)
 y el REST API de HA por red.
 
 Uso:
-    python smokesync.py setup     # asistente: pide cada variable y prueba conexion
-    python smokesync.py probe     # muestra lo que el Zidoo reporta ahora mismo
-    python smokesync.py test-fire # dispara un dispositivo 1 vez (para verificar HA)
-    python smokesync.py run       # arranca el loop de sincronizacion (CLI)
-    python smokesync.py gui       # abre la interfaz grafica
+    python 4dfx.py setup     # asistente: pide cada variable y prueba conexion
+    python 4dfx.py probe     # muestra lo que el Zidoo reporta ahora mismo
+    python 4dfx.py test-fire # dispara un dispositivo 1 vez (para verificar HA)
+    python 4dfx.py run       # arranca el loop de sincronizacion (CLI)
+    python 4dfx.py gui       # abre la interfaz grafica
 
 Requisito: pip install requests   (tkinter viene con Python, salvo en
 algunas instalaciones minimas de Linux: sudo apt install python3-tk)
@@ -30,7 +30,7 @@ except ImportError:
     print("Falta 'requests'. Instala con:  pip install requests")
     sys.exit(1)
 
-import smokesync_core as core
+import fdfx_core as core
 
 
 # --- Helpers de entrada -------------------------------------------------------
@@ -52,7 +52,7 @@ def ask(prompt, default=None, cast=str):
 # --- Asistente de configuracion ----------------------------------------------
 def cmd_setup(_args):
     print("=" * 60)
-    print(" SmokeSync  -  Asistente de configuracion")
+    print(" 4DFX  -  Asistente de configuracion")
     print("=" * 60)
     cfg = core.load_config() or dict(core.DEFAULT_CFG)
 
@@ -114,7 +114,7 @@ def cmd_setup(_args):
     print(f"\nConfiguracion guardada en: {core.CONFIG_PATH}")
     print("Coloca tus archivos .json de cues en:")
     print(f"  {cfg['cues_dir']}")
-    print("Luego corre:  python smokesync.py run   o   python smokesync.py gui")
+    print("Luego corre:  python 4dfx.py run   o   python 4dfx.py gui")
 
 
 # --- Probe / test ------------------------------------------------------------
@@ -162,21 +162,21 @@ def cmd_run(_args):
 
 
 def cmd_gui(_args):
-    import smokesync_gui
-    smokesync_gui.main()
+    import fdfx_gui
+    fdfx_gui.main()
 
 
 def _require_cfg():
     cfg = core.load_config()
     if not cfg or not cfg.get("zidoo_ip"):
-        print("No hay configuracion. Corre primero:  python smokesync.py setup")
+        print("No hay configuracion. Corre primero:  python 4dfx.py setup")
         sys.exit(1)
     return cfg
 
 
 # --- CLI ---------------------------------------------------------------------
 def main():
-    p = argparse.ArgumentParser(description="SmokeSync - efectos 4DX sincronizados con conciertos/peliculas")
+    p = argparse.ArgumentParser(description="4DFX - efectos 4D sincronizados con conciertos/peliculas")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("setup", help="asistente de configuracion")
     sub.add_parser("probe", help="mostrar lo que reporta el Zidoo ahora")

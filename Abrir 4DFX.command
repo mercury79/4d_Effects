@@ -22,7 +22,7 @@ if ! "$PYTHON" -c "import requests" >/dev/null 2>&1; then
     "$PYTHON" -m pip install --user requests
 fi
 
-"$PYTHON" smokesync_gui.py
+"$PYTHON" fdfx_gui.py
 
 echo ""
 read -p "Presiona Enter para cerrar..."

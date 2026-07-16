@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SmokeSync GUI - Interfaz grafica standalone (macOS / Windows / Raspberry Pi 4)
+4DFX GUI - Interfaz grafica standalone (macOS / Windows / Raspberry Pi 4)
 
 Monitorea la reproduccion en un Zidoo X20 Pro y dispara dispositivos
 (maquina de humo, agua, luces, estrobos, ...) via Home Assistant en los
@@ -9,7 +9,7 @@ timestamps definidos en los cue sheets.
 Requisitos: Python 3 con tkinter (incluido de fabrica en la mayoria de
 instalaciones) + `pip install requests`.
 
-Ejecutar:  python3 smokesync_gui.py
+Ejecutar:  python3 fdfx_gui.py
 """
 
 import colorsys
@@ -22,7 +22,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, messagebox, filedialog
 
-import smokesync_core as core
+import fdfx_core as core
 
 
 class _PickOneDialog(tk.Toplevel):
@@ -47,10 +47,10 @@ class _PickOneDialog(tk.Toplevel):
         self.destroy()
 
 
-class SmokeSyncGUI(tk.Tk):
+class DFXGui(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("SmokeSync - 4DX Control")
+        self.title("4DFX - Control de efectos")
         self.geometry("1920x1080")
         self.minsize(760, 520)
 
@@ -67,6 +67,7 @@ class SmokeSyncGUI(tk.Tk):
         self._capture_held = {}
         self._capture_release_jobs = {}
         self._monitor_stop = threading.Event()
+        self.var_player_type = tk.StringVar(value=self.cfg.get("player_type", "zidoo"))
 
         self._build_ui()
         self._refresh_devices_list()
@@ -155,6 +156,7 @@ class SmokeSyncGUI(tk.Tk):
         self.var_dev_entity = tk.StringVar()
         self.var_dev_kind = tk.StringVar(value="binary")
         self.var_dev_shortcut = tk.StringVar()
+        self.var_dev_lead_time = tk.StringVar()
 
         ttk.Label(right, text="Nombre (ej: humo, agua, luces, ventilador)").pack(anchor="w")
         ttk.Entry(right, textvariable=self.var_dev_name, width=30).pack(fill="x", pady=(0, 8))
@@ -168,6 +170,9 @@ class SmokeSyncGUI(tk.Tk):
         self.frame_dev_shortcut.pack(fill="x", pady=(0, 8))
         ttk.Label(self.frame_dev_shortcut, text="Atajo de teclado (1 caracter, para captura en vivo / Stream Deck)").pack(anchor="w")
         ttk.Entry(self.frame_dev_shortcut, textvariable=self.var_dev_shortcut, width=4).pack(anchor="w")
+
+        ttk.Label(right, text="Lead time (s) de este dispositivo (opcional, vacio = usar el de la cue sheet)").pack(anchor="w")
+        ttk.Entry(right, textvariable=self.var_dev_lead_time, width=6).pack(anchor="w", pady=(0, 8))
 
         # -- Avanzado: para dispositivos que no son una entidad HA nativa de
         # on/off, sino un script/servicio generico (ej remote.send_command de
@@ -274,6 +279,10 @@ class SmokeSyncGUI(tk.Tk):
         self.combo_test_state = ttk.Combobox(test_row, textvariable=self.var_test_state, width=10, state="readonly")
         self.combo_test_state.pack(side="left")
         ttk.Button(test_row, text="Probar", command=self.test_fire_selected).pack(side="left", padx=4)
+        self.btn_test_on = ttk.Button(test_row, text="Probar ON", command=lambda: self._test_fire_side("on"))
+        self.btn_test_on.pack(side="left", padx=2)
+        self.btn_test_off = ttk.Button(test_row, text="Probar OFF", command=lambda: self._test_fire_side("off"))
+        self.btn_test_off.pack(side="left", padx=2)
         self.lbl_test_result = ttk.Label(right, text="", foreground="#666", wraplength=220)
         self.lbl_test_result.pack(anchor="w", pady=(4, 0))
 
@@ -358,35 +367,68 @@ class SmokeSyncGUI(tk.Tk):
     def _build_cues_tab(self):
         f = self.tab_cues
         self.current_sheet_path = None
+        self._prev_sheet_selection = None
+        self._editing_cue_iid = None
 
-        left = ttk.Frame(f, padding=10)
-        left.pack(side="left", fill="y")
+        paned = ttk.Panedwindow(f, orient="horizontal")
+        paned.pack(fill="both", expand=True)
+
+        self.frame_sheet_list = ttk.Frame(f, padding=10)
+        left = self.frame_sheet_list
         ttk.Label(left, text="Cue sheets (.json)", font=("", 10, "bold")).pack(anchor="w")
         self.list_sheets = tk.Listbox(left, width=32, height=20, exportselection=False)
-        self.list_sheets.pack(fill="y", expand=True)
+        self.list_sheets.pack(fill="both", expand=True)
         self.list_sheets.bind("<<ListboxSelect>>", self._on_sheet_select)
         sheet_btns = ttk.Frame(left)
         sheet_btns.pack(fill="x", pady=6)
         ttk.Button(sheet_btns, text="Nuevo", command=self._new_sheet).pack(side="left")
         ttk.Button(sheet_btns, text="Eliminar", command=self._delete_sheet).pack(side="left", padx=4)
         ttk.Button(left, text="Importar .txt (AVS Forum)...", command=self._import_state_txt).pack(fill="x", pady=(10, 2))
+        paned.add(left, weight=0)
 
         right = ttk.Frame(f, padding=10)
-        right.pack(side="left", fill="both", expand=True)
+        paned.add(right, weight=1)
+
+        toggle_row = ttk.Frame(right)
+        toggle_row.pack(fill="x")
+        self._sheet_list_visible = True
+        self.btn_toggle_sheet_list = ttk.Button(toggle_row, text="« Ocultar lista de cue sheets",
+                                                 command=lambda: self._toggle_sheet_list(paned))
+        self.btn_toggle_sheet_list.pack(side="left")
+        self._paned_cues = paned
+
+        src_row = ttk.Frame(right)
+        src_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(src_row, text="Fuente de reproduccion:").pack(side="left")
+        combo_cues_player = ttk.Combobox(src_row, textvariable=self.var_player_type, state="readonly",
+                                          values=["zidoo", "vlc", "jriver"], width=10)
+        combo_cues_player.pack(side="left", padx=6)
+        combo_cues_player.bind("<<ComboboxSelected>>", lambda e: self._on_player_type_selected())
+
+        self.btn_cues_start_sync = ttk.Button(src_row, text="Iniciar sincronizacion", command=self.start_sync)
+        self.btn_cues_start_sync.pack(side="left", padx=(16, 2))
+        self.btn_cues_stop_sync = ttk.Button(src_row, text="Detener", command=self.stop_sync, state="disabled")
+        self.btn_cues_stop_sync.pack(side="left")
+        ttk.Label(src_row, text="  (dispara los cues en vivo mientras editas/scrubeas)",
+                  foreground="#666", font=("", 8)).pack(side="left")
 
         meta = ttk.Frame(right)
-        meta.pack(fill="x", pady=(0, 8))
+        meta.pack(fill="x", pady=(0, 2))
         self.var_sheet_match = tk.StringVar()
         self.var_sheet_lead = tk.StringVar()
         self.var_sheet_filename = tk.StringVar()
         ttk.Label(meta, text="Match (substring del titulo)").grid(row=0, column=0, sticky="w")
         ttk.Entry(meta, textvariable=self.var_sheet_match, width=28).grid(row=0, column=1, sticky="w", padx=4)
-        ttk.Button(meta, text="Usar titulo actual (Zidoo)", command=self._use_current_title).grid(row=0, column=2, sticky="w", padx=4)
+        ttk.Button(meta, text="Usar titulo actual", command=self._use_current_title).grid(row=0, column=2, sticky="w", padx=4)
         ttk.Label(meta, text="Lead time (s)").grid(row=0, column=3, sticky="w")
         ttk.Entry(meta, textvariable=self.var_sheet_lead, width=6).grid(row=0, column=4, sticky="w", padx=4)
         ttk.Label(meta, text="Archivo").grid(row=1, column=0, sticky="w", pady=(4, 0))
         ttk.Entry(meta, textvariable=self.var_sheet_filename, width=28).grid(row=1, column=1, sticky="w", padx=4, pady=(4, 0))
         ttk.Button(meta, text="Guardar cue sheet", command=self._save_sheet).grid(row=1, column=4, sticky="w", pady=(4, 0))
+        ttk.Label(meta, text="Lead time: segundos de anticipacion con que se dispara cada cue antes\n"
+                             "de su timestamp exacto (para compensar lo que tarda en reaccionar el\n"
+                             "efecto fisico, ej. que el humo empiece a salir).",
+                  foreground="#666", font=("", 8)).grid(row=2, column=0, columnspan=5, sticky="w", pady=(4, 0))
 
         self._build_video_preview(right)
 
@@ -457,9 +499,9 @@ class SmokeSyncGUI(tk.Tk):
         self.var_cue_value = tk.StringVar()
 
         ttk.Label(form, text="Timestamp (HH:MM:SS)").grid(row=0, column=0, sticky="w")
-        entry_cue_t = ttk.Entry(form, textvariable=self.var_cue_t, width=12)
+        entry_cue_t = self._add_time_stepper(form, self.var_cue_t, self._on_cue_duration_change,
+                                              width=12, is_duration=False)
         entry_cue_t.grid(row=0, column=1, sticky="w", padx=4)
-        entry_cue_t.bind("<FocusOut>", self._on_cue_duration_change)
 
         ttk.Label(form, text="Dispositivo").grid(row=0, column=2, sticky="w")
         self.combo_cue_device = ttk.Combobox(form, textvariable=self.var_cue_device, width=14, state="readonly")
@@ -475,15 +517,15 @@ class SmokeSyncGUI(tk.Tk):
 
         ttk.Label(form, text="Duracion (s) / Estado").grid(row=2, column=0, sticky="w", pady=(6, 0))
         self.var_cue_duration = tk.StringVar(value="3")
-        self.entry_cue_duration = ttk.Entry(form, textvariable=self.var_cue_duration, width=10)
-        self.entry_cue_duration.grid(row=2, column=1, sticky="w", padx=4, pady=(6, 0))
-        self.entry_cue_duration.bind("<FocusOut>", self._on_cue_duration_change)
+        self.entry_cue_duration = self._add_time_stepper(form, self.var_cue_duration, self._on_cue_duration_change,
+                                                           width=10, is_duration=True, step=0.5)
         self.combo_cue_state = ttk.Combobox(form, textvariable=self.var_cue_value, width=10, state="readonly")
+        self.combo_cue_state.bind("<<ComboboxSelected>>", self._on_cue_state_change)
 
         self.lbl_cue_end = ttk.Label(form, text="Fin (HH:MM:SS)")
         self.var_cue_end = tk.StringVar()
-        self.entry_cue_end = ttk.Entry(form, textvariable=self.var_cue_end, width=12)
-        self.entry_cue_end.bind("<FocusOut>", self._on_cue_end_change)
+        self.entry_cue_end = self._add_time_stepper(form, self.var_cue_end, self._on_cue_end_change,
+                                                      width=12, is_duration=False)
 
         btns2 = ttk.Frame(form)
         btns2.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
@@ -491,35 +533,34 @@ class SmokeSyncGUI(tk.Tk):
         ttk.Button(btns2, text="Eliminar cue seleccionado", command=self._delete_cue).pack(side="left", padx=4)
 
         self._refresh_cue_device_options()
-        self._new_sheet()
+        self._new_sheet(confirm=False)
         self._refresh_sheet_list()
 
-    # ---- Vista previa de video embebida (libVLC) -----------------------
+    # ---- Vista previa de video: VLC en su propia ventana, controlado ----
+    # ---- por su interfaz HTTP (embeber libVLC via NSView/CAOpenGLLayer --
+    # ---- resulto inestable en macOS reciente: segfault confirmado en   --
+    # ---- libcaopengllayer_plugin.dylib incluso tras actualizar VLC y   --
+    # ---- forzar --vout=macosx; VLC en ventana propia es 100% estable). --
     def _build_video_preview(self, parent):
-        self.vlc_instance = None
-        self.vlc_player = None
         self.preview_active = False
         self._preview_seek_dragging = False
         self._preview_duration_s = 0.0
+        self._auto_started_sync = False
 
-        box = ttk.LabelFrame(parent, text="Vista previa de video (edicion local, no requiere el Zidoo)", padding=6)
+        box = ttk.LabelFrame(parent, text="Vista previa de video (VLC, no requiere el Zidoo)", padding=6)
         box.pack(fill="x", pady=(0, 8))
 
         toolbar = ttk.Frame(box)
         toolbar.pack(fill="x")
-        ttk.Button(toolbar, text="Abrir video...", command=self._open_preview_video).pack(side="left")
-        self.btn_preview_play = ttk.Button(toolbar, text="Reproducir", command=self._toggle_preview_play, state="disabled")
+        ttk.Button(toolbar, text="Abrir video en VLC...", command=self._open_preview_video).pack(side="left")
+        self.btn_preview_play = ttk.Button(toolbar, text="Pausar/Reproducir", command=self._toggle_preview_play, state="disabled")
         self.btn_preview_play.pack(side="left", padx=4)
         ttk.Button(toolbar, text="Cerrar", command=self._close_preview_video).pack(side="left")
         self.lbl_preview_file = ttk.Label(toolbar, text="(sin video cargado)", foreground="#666")
         self.lbl_preview_file.pack(side="left", padx=10)
 
-        self.frame_preview_video = tk.Frame(box, background="black", height=280)
-        self.frame_preview_video.pack(fill="x", pady=(6, 4))
-        self.frame_preview_video.pack_propagate(False)
-
         seek_row = ttk.Frame(box)
-        seek_row.pack(fill="x")
+        seek_row.pack(fill="x", pady=(6, 0))
         self.var_preview_seek = tk.DoubleVar(value=0.0)
         self.scale_preview = ttk.Scale(seek_row, from_=0, to=1000, variable=self.var_preview_seek,
                                         orient="horizontal", command=self._on_preview_seek_drag)
@@ -528,9 +569,10 @@ class SmokeSyncGUI(tk.Tk):
         self.scale_preview.bind("<ButtonRelease-1>", self._on_preview_seek_release)
         self.lbl_preview_time = ttk.Label(seek_row, text="00:00 / 00:00", width=14)
         self.lbl_preview_time.pack(side="left", padx=6)
-        ttk.Label(box, text="Con el video en reproduccion, los atajos de captura en vivo\n"
-                            "usan esta posicion (igual que si fuera el Zidoo real).",
-                  foreground="#666", font=("", 8)).pack(anchor="w", pady=(2, 0))
+        ttk.Label(box, text="VLC se abre en su propia ventana (junto a esta app) y se controla via\n"
+                            "su interfaz HTTP. Con el video en reproduccion, los atajos de captura\n"
+                            "en vivo usan esa posicion (igual que si fuera el Zidoo real).",
+                  foreground="#666", font=("", 8)).pack(anchor="w", pady=(4, 0))
 
     def _open_preview_video(self):
         path = filedialog.askopenfilename(
@@ -538,48 +580,71 @@ class SmokeSyncGUI(tk.Tk):
             filetypes=[("Video", "*.mp4 *.mkv *.mov *.avi *.m4v *.ts"), ("Todos", "*.*")])
         if not path:
             return
-        try:
-            import vlc
-        except ImportError:
-            messagebox.showerror("Falta python-vlc",
-                                  "Instala con: pip install python-vlc\n"
-                                  "(requiere tener VLC instalado en el sistema)")
+        ok, err = core.launch_vlc_with_file(self.cfg, path)
+        if not ok:
+            messagebox.showerror("No se pudo abrir VLC", err)
             return
-        if self.vlc_instance is None:
-            self.vlc_instance = vlc.Instance()
-            self.vlc_player = self.vlc_instance.media_player_new()
-            handle = self.frame_preview_video.winfo_id()
-            if sys.platform.startswith("linux"):
-                self.vlc_player.set_xwindow(handle)
-            elif sys.platform == "win32":
-                self.vlc_player.set_hwnd(handle)
-            elif sys.platform == "darwin":
-                self.vlc_player.set_nsobject(handle)
-        media = self.vlc_instance.media_new(path)
-        self.vlc_player.set_media(media)
-        self.vlc_player.play()
         self.preview_active = True
         self.lbl_preview_file.config(text=Path(path).name)
-        self.btn_preview_play.config(state="normal", text="Pausar")
-        self.after(300, self._poll_preview_player)
+        self.btn_preview_play.config(state="normal")
+        self.after(1500, self._poll_preview_player)
+
+        # Siempre trabajamos con la cue sheet del video que se esta editando:
+        # si ya existe una que haga match con el titulo, se carga sola; si
+        # no, se crea una nueva con ese nombre para evitar confundirse con
+        # otras cue sheets de la lista.
+        self._load_or_create_sheet_for_title(Path(path).stem)
+
+        # Al abrir el video de edicion, activamos captura y sincronizacion
+        # solas: la idea es abrir VLC y ya poder ver/crear efectos en vivo
+        # sin pasos manuales extra.
+        if not self.capture_on:
+            self.var_capture_on.set(True)
+            self._toggle_capture()
+        self._auto_started_sync = self.start_sync(auto=True)
+
+    def _load_or_create_sheet_for_title(self, title):
+        """Busca una cue sheet existente que aplique a 'title'; si no hay
+        ninguna, crea una nueva con ese nombre/match de una vez (asi el
+        archivo ya existe y coincide exactamente con lo que se esta viendo,
+        sin confundirse con otras cue sheets de la lista)."""
+        title = core.strip_video_ext(title)
+        sheets = core.load_cue_sheets(self.cfg, log=lambda *_: None)
+        found = core.match_sheet(sheets, title)
+        if found:
+            fname = found["_file"]
+            for i in range(self.list_sheets.size()):
+                if self.list_sheets.get(i) == fname:
+                    self.list_sheets.selection_clear(0, "end")
+                    self.list_sheets.selection_set(i)
+                    self._on_sheet_select(None)
+                    break
+            self.log(f"Cue sheet existente cargada para '{title}': {fname}")
+        else:
+            self._new_sheet(confirm=False)
+            self.var_sheet_match.set(title)
+            self.var_sheet_filename.set(f"{core.slug_for_title(title)}.json")
+            self._autosave_sheet()
+            self.log(f"Cue sheet nueva creada para '{title}'.")
 
     def _toggle_preview_play(self):
-        if not self.vlc_player:
+        if not self.preview_active:
             return
-        if self.vlc_player.is_playing():
-            self.vlc_player.pause()
-            self.btn_preview_play.config(text="Reproducir")
-        else:
-            self.vlc_player.play()
-            self.btn_preview_play.config(text="Pausar")
+        core.vlc_control(self.cfg, "pl_pause")
 
     def _close_preview_video(self):
-        if self.vlc_player:
-            self.vlc_player.stop()
+        if self.preview_active:
+            core.vlc_control(self.cfg, "pl_stop")
         self.preview_active = False
         self.lbl_preview_file.config(text="(sin video cargado)")
-        self.btn_preview_play.config(state="disabled", text="Reproducir")
+        self.btn_preview_play.config(state="disabled")
         self.lbl_preview_time.config(text="00:00 / 00:00")
+        if self.capture_on:
+            self.var_capture_on.set(False)
+            self._toggle_capture()
+        if getattr(self, "_auto_started_sync", False):
+            self.stop_sync()
+            self._auto_started_sync = False
 
     def _on_preview_seek_drag(self, _value):
         if self._preview_seek_dragging and self._preview_duration_s:
@@ -589,32 +654,47 @@ class SmokeSyncGUI(tk.Tk):
 
     def _on_preview_seek_release(self, _event):
         self._preview_seek_dragging = False
-        if self.vlc_player and self._preview_duration_s:
+        if self.preview_active and self._preview_duration_s:
             frac = self.var_preview_seek.get() / 1000.0
-            self.vlc_player.set_time(int(frac * self._preview_duration_s * 1000))
+            core.vlc_control(self.cfg, "seek", val=int(frac * self._preview_duration_s))
 
     def seek_preview_to(self, seconds):
         """Mueve la vista previa a un timestamp (usado al hacer clic en la regla del timeline)."""
-        if self.vlc_player and self.preview_active:
-            self.vlc_player.set_time(int(max(0, seconds) * 1000))
+        if self.preview_active:
+            core.vlc_control(self.cfg, "seek", val=int(max(0, seconds)))
 
     def _poll_preview_player(self):
-        if self.preview_active and self.vlc_player:
-            length_ms = self.vlc_player.get_length()
-            time_ms = self.vlc_player.get_time()
-            if length_ms and length_ms > 0:
-                self._preview_duration_s = length_ms / 1000.0
-                if not self._preview_seek_dragging:
-                    self.var_preview_seek.set((time_ms / length_ms) * 1000.0)
-                pos_s = time_ms / 1000.0
+        if self.preview_active:
+            title, pos_s, playing, err = core.vlc_playback(self.cfg)
+            if err:
+                if err != getattr(self, "_last_preview_err", None):
+                    self.log(f"Vista previa: sin conexion con VLC aun ({err}). Reintentando...")
+                    self._last_preview_err = err
+                self.lbl_preview_time.config(text="(esperando VLC...)")
+            elif not err and pos_s is not None:
+                self._last_preview_err = None
+                # vlc_playback no expone la duracion total; la leemos aparte
+                # via el mismo status.json a traves de vlc_control no aplica,
+                # asi que usamos requests directo solo para 'length'.
+                try:
+                    import requests
+                    r = requests.get(f"{self.cfg['vlc_url'].rstrip('/')}/requests/status.json",
+                                      auth=("", self.cfg.get("vlc_password", "")), timeout=2)
+                    length_s = float(r.json().get("length") or 0)
+                except Exception:
+                    length_s = self._preview_duration_s
+                if length_s > 0:
+                    self._preview_duration_s = length_s
+                    if not self._preview_seek_dragging:
+                        self.var_preview_seek.set((pos_s / length_s) * 1000.0)
                 self.lbl_preview_time.config(
                     text=f"{core.fmt_time(pos_s)} / {core.fmt_time(self._preview_duration_s)}")
                 self.last_pos = pos_s
-                self.last_title = self.lbl_preview_file.cget("text")
+                self.last_title = title or self.lbl_preview_file.cget("text")
                 self._draw_playhead()
                 if hasattr(self, "lbl_capture_pos"):
                     self._update_capture_pos_label()
-            self.after(200, self._poll_preview_player)
+            self.after(400, self._poll_preview_player)
 
     # ---- helpers de la pestana de cues --------------------------------
     def _refresh_cue_device_options(self):
@@ -637,6 +717,101 @@ class SmokeSyncGUI(tk.Tk):
         else:
             self.var_cue_mode.set("burst")
         self._on_cue_mode_change()
+        self._commit_form_to_tree()
+
+    def _commit_form_to_tree(self):
+        """Aplica en vivo lo que hay en el formulario (Timestamp/Duracion/
+        Fin/Estado/Dispositivo) al cue que se esta editando en la tabla y la
+        timeline, sin esperar a que se pulse 'Agregar / actualizar cue'. Asi
+        las flechitas +/- y teclear un valor se ven reflejados de inmediato."""
+        iid = self._editing_cue_iid
+        if not iid or not self.tree_cues.exists(iid):
+            return
+        t = self.var_cue_t.get().strip()
+        device = self.var_cue_device.get().strip()
+        if not t or not device:
+            return
+        mode = self.var_cue_mode.get()
+        if mode == "state":
+            modo, valor = "state", self.var_cue_value.get()
+        elif mode == "scene":
+            modo, valor = "scene", ""
+        else:
+            try:
+                dur = float(self.var_cue_duration.get() or 0)
+            except ValueError:
+                return
+            modo, valor = "burst", f"{dur}s"
+        self.tree_cues.item(iid, values=(t, device, modo, valor))
+        self._refresh_timeline()
+        self._autosave_sheet()
+
+    def _autosave_sheet(self):
+        """Escribe la cue sheet actual a disco de inmediato, sin dialogo ni
+        boton: el archivo siempre debe reflejar lo que se ve en pantalla,
+        para que la sincronizacion en vivo dispare exactamente eso sin tener
+        que acordarse de guardar."""
+        match = self.var_sheet_match.get().strip()
+        fname = self.var_sheet_filename.get().strip()
+        if not match or not fname:
+            return
+        if not fname.endswith(".json"):
+            fname += ".json"
+        d = Path(self.cfg["cues_dir"])
+        d.mkdir(parents=True, exist_ok=True)
+        target = d / fname
+        is_new_file = not target.exists()
+        data = {
+            "match": match,
+            "lead_time_s": float(self.var_sheet_lead.get() or self.cfg.get("lead_time_s", 4)),
+            "cues": self._tree_cues_to_list(),
+        }
+        target.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        self.current_sheet_path = target
+        if self.engine and self.engine.running:
+            self.engine.refresh_sheets()
+        if is_new_file:
+            self._refresh_sheet_list()
+            for i in range(self.list_sheets.size()):
+                if self.list_sheets.get(i) == fname:
+                    self.list_sheets.selection_clear(0, "end")
+                    self.list_sheets.selection_set(i)
+                    self._prev_sheet_selection = i
+                    break
+
+    def _add_time_stepper(self, parent, var, on_change, width=12, is_duration=False, step=1.0):
+        """Crea un Entry con botones +/- al lado para ajustar el valor sin
+        teclear ni arrastrar en la timeline. 'is_duration' controla si el
+        valor es un numero de segundos plano (duracion) o un timestamp
+        HH:MM:SS (t / fin)."""
+        wrap = ttk.Frame(parent)
+        entry = ttk.Entry(wrap, textvariable=var, width=width)
+        entry.pack(side="left")
+        if on_change:
+            entry.bind("<FocusOut>", on_change)
+
+        def _step(delta):
+            if is_duration:
+                try:
+                    val = float(var.get() or 0)
+                except ValueError:
+                    val = 0.0
+                var.set(str(max(0.1, round(val + delta, 2))))
+            else:
+                try:
+                    val = core.parse_time(var.get())
+                except Exception:
+                    val = 0.0
+                var.set(core.fmt_time_ms(max(0.0, round(val + delta, 2))))
+            if on_change:
+                on_change()
+
+        btns = ttk.Frame(wrap)
+        btns.pack(side="left", padx=(2, 0))
+        btn_opts = dict(width=1, padx=0, pady=0, font=("", 7), highlightthickness=0, bd=1)
+        tk.Button(btns, text="▲", command=lambda: _step(step), **btn_opts).pack()
+        tk.Button(btns, text="▼", command=lambda: _step(-step), **btn_opts).pack()
+        return wrap
 
     def _on_cue_mode_change(self):
         mode = self.var_cue_mode.get()
@@ -652,6 +827,7 @@ class SmokeSyncGUI(tk.Tk):
             self.entry_cue_end.grid(row=2, column=3, sticky="w", padx=4, pady=(6, 0))
             self._sync_cue_end_from_duration()
         # 'scene': ni duracion ni estado, solo dispara al llegar el timestamp
+        self._commit_form_to_tree()
 
     def _sync_cue_end_from_duration(self):
         try:
@@ -663,6 +839,7 @@ class SmokeSyncGUI(tk.Tk):
 
     def _on_cue_duration_change(self, _event=None):
         self._sync_cue_end_from_duration()
+        self._commit_form_to_tree()
 
     def _on_cue_end_change(self, _event=None):
         try:
@@ -672,6 +849,19 @@ class SmokeSyncGUI(tk.Tk):
             return
         dur = max(0.2, end - start)
         self.var_cue_duration.set(str(round(dur, 2)))
+        self._commit_form_to_tree()
+
+    def _on_cue_state_change(self, _event=None):
+        self._commit_form_to_tree()
+
+    def _toggle_sheet_list(self, paned):
+        if self._sheet_list_visible:
+            paned.forget(self.frame_sheet_list)
+            self.btn_toggle_sheet_list.config(text="» Mostrar lista de cue sheets")
+        else:
+            paned.insert(0, self.frame_sheet_list, weight=0)
+            self.btn_toggle_sheet_list.config(text="« Ocultar lista de cue sheets")
+        self._sheet_list_visible = not self._sheet_list_visible
 
     def _refresh_sheet_list(self):
         self.list_sheets.delete(0, "end")
@@ -679,6 +869,18 @@ class SmokeSyncGUI(tk.Tk):
         d.mkdir(parents=True, exist_ok=True)
         for fpath in sorted(d.glob("*.json")):
             self.list_sheets.insert("end", fpath.name)
+
+    def _warn_if_title_mismatch(self, match):
+        """Si hay un titulo actual del reproductor y no coincide con el
+        'match' de la cue sheet, avisa (no bloquea, solo informa)."""
+        if not match or not self.last_title:
+            return
+        if match.strip().lower() not in self.last_title.strip().lower():
+            messagebox.showwarning(
+                "Titulo distinto",
+                f"Esta cue sheet es para '{match}', pero el reproductor "
+                f"muestra ahora mismo:\n'{self.last_title}'.\n\n"
+                "Vas a seguir editando/guardando sobre la cue sheet equivocada?")
 
     def _on_sheet_select(self, _event):
         sel = self.list_sheets.curselection()
@@ -692,10 +894,13 @@ class SmokeSyncGUI(tk.Tk):
             messagebox.showerror("Error", f"No pude leer {fname}: {e}")
             return
         self.current_sheet_path = path
+        self._editing_cue_iid = None
         self.var_sheet_match.set(data.get("match", ""))
         self.var_sheet_lead.set(str(data.get("lead_time_s", self.cfg.get("lead_time_s", 4))))
         self.var_sheet_filename.set(fname)
         self._load_cues_into_tree(data.get("cues", []))
+        self._prev_sheet_selection = sel[0]
+        self._warn_if_title_mismatch(data.get("match", ""))
 
     def _load_cues_into_tree(self, cues):
         self.tree_cues.delete(*self.tree_cues.get_children())
@@ -724,13 +929,16 @@ class SmokeSyncGUI(tk.Tk):
         cues.sort(key=lambda c: core.parse_time(c["t"]))
         return cues
 
-    def _new_sheet(self):
+    def _new_sheet(self, confirm=True):
         self.current_sheet_path = None
+        self._editing_cue_iid = None
         self.var_sheet_match.set("")
         self.var_sheet_lead.set(str(self.cfg.get("lead_time_s", 4)))
         self.var_sheet_filename.set("nuevo_cue_sheet.json")
         self.tree_cues.delete(*self.tree_cues.get_children())
         self._refresh_timeline()
+        self.list_sheets.selection_clear(0, "end")
+        self._prev_sheet_selection = None
 
     def _delete_sheet(self):
         sel = self.list_sheets.curselection()
@@ -741,7 +949,7 @@ class SmokeSyncGUI(tk.Tk):
             return
         (Path(self.cfg["cues_dir"]) / fname).unlink(missing_ok=True)
         self._refresh_sheet_list()
-        self._new_sheet()
+        self._new_sheet(confirm=False)
 
     def _add_cue(self):
         t = self.var_cue_t.get().strip()
@@ -753,6 +961,13 @@ class SmokeSyncGUI(tk.Tk):
             core.parse_time(t)
         except Exception:
             messagebox.showwarning("Timestamp invalido", "Usa formato HH:MM:SS, MM:SS o segundos.")
+            return
+
+        # Si ya se esta editando un cue existente (seleccionado en la tabla),
+        # los cambios ya se aplicaron en vivo con cada ajuste - este boton
+        # solo confirma, no debe crear un duplicado.
+        if self._editing_cue_iid and self.tree_cues.exists(self._editing_cue_iid):
+            self._commit_form_to_tree()
             return
 
         cues = self._tree_cues_to_list()
@@ -767,12 +982,26 @@ class SmokeSyncGUI(tk.Tk):
             cues.append({"t": t, "device": device, "duration_s": dur})
         self._load_cues_into_tree(cues)
 
+        # Seleccionar el cue recien creado para poder seguir ajustandolo en
+        # vivo con las flechitas sin tener que volver a buscarlo en la tabla.
+        for iid in self.tree_cues.get_children():
+            vals = self.tree_cues.item(iid, "values")
+            if vals[0] == t and vals[1] == device:
+                self.tree_cues.selection_set(iid)
+                self._editing_cue_iid = iid
+                break
+        self._autosave_sheet()
+
     def _on_cue_double_click(self, _event):
         sel = self.tree_cues.selection()
         if sel:
             self._load_cue_into_form(sel[0])
 
     def _load_cue_into_form(self, iid):
+        # Mientras se puebla el formulario, ningun cambio de variable debe
+        # disparar un commit en vivo (se pisaria la fila con datos a medio
+        # cargar) - por eso se desactiva la edicion hasta terminar.
+        self._editing_cue_iid = None
         t, device, modo, valor = self.tree_cues.item(iid, "values")
         self.var_cue_t.set(t)
         self.var_cue_device.set(device)
@@ -783,6 +1012,7 @@ class SmokeSyncGUI(tk.Tk):
         elif modo == "burst":
             self.var_cue_duration.set(str(valor).rstrip("s"))
         self._on_cue_mode_change()
+        self._editing_cue_iid = iid
 
     def _delete_cue(self):
         sel = list(self.tree_cues.selection())
@@ -804,7 +1034,10 @@ class SmokeSyncGUI(tk.Tk):
         if next_iid and self.tree_cues.exists(next_iid):
             self.tree_cues.selection_set(next_iid)
             self._load_cue_into_form(next_iid)
+        else:
+            self._editing_cue_iid = None
         self._refresh_timeline()
+        self._autosave_sheet()
 
     def _on_delete_key(self, event):
         # No interferir con Backspace/Supr mientras se edita texto en un
@@ -822,11 +1055,11 @@ class SmokeSyncGUI(tk.Tk):
         if not title:
             messagebox.showinfo("Sin titulo", "El reproductor no reporta un titulo en este momento.")
             return
+        title = core.strip_video_ext(title)
         self.var_sheet_match.set(title)
         if not self.var_sheet_filename.get() or self.var_sheet_filename.get() == "nuevo_cue_sheet.json":
-            slug = "".join(c if c.isalnum() else "_" for c in title.lower()).strip("_")
-            self.var_sheet_filename.set(f"{slug}.json")
-        self.log(f"Titulo actual del Zidoo: '{title}'")
+            self.var_sheet_filename.set(f"{core.slug_for_title(title)}.json")
+        self.log(f"Titulo actual ({self.cfg.get('player_type', 'zidoo')}): '{title}'")
 
     # ---- Captura en vivo (atajos de teclado / Stream Deck) ----------------
     # Cuanto esperar tras un KeyRelease antes de darlo por bueno: si en ese
@@ -883,7 +1116,7 @@ class SmokeSyncGUI(tk.Tk):
             return  # ya esta registrada (no deberia pasar, por seguridad)
 
         if self.last_pos is None:
-            self.log("[captura] sin posicion del Zidoo todavia (¿esta reproduciendo?).")
+            self.log("[captura] sin posicion del reproductor todavia (¿esta reproduciendo?).")
             return
 
         device_name, mode, extra = match
@@ -1241,6 +1474,7 @@ class SmokeSyncGUI(tk.Tk):
             if new_iid:
                 self.tree_cues.selection_set(new_iid)
                 self._load_cue_into_form(new_iid)
+            self._autosave_sheet()
         else:
             # Fue un clic simple (sin arrastre real): solo seleccionar y
             # cargar en el formulario para editar, sin reordenar la lista.
@@ -1256,6 +1490,11 @@ class SmokeSyncGUI(tk.Tk):
 
     def _on_cue_tree_select(self, _event):
         self._refresh_timeline()
+        sel = self.tree_cues.selection()
+        if len(sel) == 1:
+            self._load_cue_into_form(sel[0])
+        else:
+            self._editing_cue_iid = None
 
     def _save_sheet(self):
         fname = self.var_sheet_filename.get().strip()
@@ -1268,18 +1507,31 @@ class SmokeSyncGUI(tk.Tk):
         if not match:
             messagebox.showwarning("Falta 'match'", "Escribe un substring del titulo para asociar esta cue sheet.")
             return
+
+        d = Path(self.cfg["cues_dir"])
+        d.mkdir(parents=True, exist_ok=True)
+        target = d / fname
+        if target.exists() and target != self.current_sheet_path:
+            if not messagebox.askyesno(
+                    "Sobrescribir archivo existente",
+                    f"Ya existe '{fname}' y no es el archivo que tenias cargado.\n"
+                    "¿Sobrescribirlo con los cues que estas editando ahora?"):
+                return
+
+        self._warn_if_title_mismatch(match)
+
         data = {
             "match": match,
             "lead_time_s": float(self.var_sheet_lead.get() or self.cfg.get("lead_time_s", 4)),
             "cues": self._tree_cues_to_list(),
         }
-        d = Path(self.cfg["cues_dir"])
-        d.mkdir(parents=True, exist_ok=True)
-        (d / fname).write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        self.current_sheet_path = d / fname
+        target.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        self.current_sheet_path = target
         self._refresh_sheet_list()
+        if self.engine and self.engine.running:
+            self.engine.refresh_sheets()
         self.log(f"Cue sheet guardada: {fname} ({len(data['cues'])} cues)")
-        messagebox.showinfo("SmokeSync", f"Guardado: {fname}")
+        messagebox.showinfo("4DFX", f"Guardado: {fname}")
 
     def _import_state_txt(self):
         multi_state_devices = [d["name"] for d in self.cfg.get("devices", []) if d.get("kind") == "multi_state"]
@@ -1344,12 +1596,14 @@ class SmokeSyncGUI(tk.Tk):
         type_row = ttk.Frame(player_frame)
         type_row.pack(fill="x", pady=(0, 8))
         ttk.Label(type_row, text="Tipo:").pack(side="left")
-        self.var_player_type = tk.StringVar(value=self.cfg.get("player_type", "zidoo"))
         self.vars["player_type"] = self.var_player_type
         combo_player = ttk.Combobox(type_row, textvariable=self.var_player_type, state="readonly",
                                      values=["zidoo", "vlc", "jriver"], width=10)
         combo_player.pack(side="left", padx=6)
-        combo_player.bind("<<ComboboxSelected>>", lambda e: self._on_player_type_change())
+        combo_player.bind("<<ComboboxSelected>>", lambda e: self._on_player_type_selected())
+
+        ttk.Label(player_frame, text=f"IP de esta maquina en tu red: {core.local_ip()}",
+                  foreground="#666", font=("", 8)).pack(anchor="w", pady=(0, 6))
 
         self.frame_player_zidoo = ttk.Frame(player_frame)
         row(self.frame_player_zidoo, "IP", "zidoo_ip", 0)
@@ -1415,6 +1669,15 @@ class SmokeSyncGUI(tk.Tk):
         else:
             self.frame_player_zidoo.pack(fill="x")
 
+    def _on_player_type_selected(self):
+        """Cambia la fuente de reproduccion de inmediato (no hace falta ir a
+        Configuracion ni pulsar 'Guardar'), para poder conmutar Zidoo/VLC/
+        JRiver mientras se edita una cue sheet."""
+        self.cfg["player_type"] = self.var_player_type.get()
+        core.save_config(self.cfg)
+        self._on_player_type_change()
+        self.log(f"Fuente de reproduccion: {self.var_player_type.get()}")
+
     def _pick_cues_dir(self):
         d = filedialog.askdirectory()
         if d:
@@ -1450,6 +1713,14 @@ class SmokeSyncGUI(tk.Tk):
                 self.lbl_zidoo.config(text=f"{ptype}: OK", foreground="green")
                 self.last_title = title
                 self.last_pos = pos
+                # Si ya hay una cue sheet que coincide con lo que se esta
+                # reproduciendo y la sincronizacion no esta activa, la
+                # arrancamos sola (una sola vez por titulo, para no
+                # reintentar en cada tick si la config esta incompleta).
+                if sheet and not (self.engine and self.engine.running):
+                    if getattr(self, "_last_auto_sync_title", None) != title:
+                        self._last_auto_sync_title = title
+                        self.start_sync(auto=True)
                 if hasattr(self, "lbl_capture_pos"):
                     self._update_capture_pos_label()
                 if hasattr(self, "timeline_canvas") and not self._timeline_drag:
@@ -1569,6 +1840,7 @@ class SmokeSyncGUI(tk.Tk):
         self.var_dev_entity.set(device["entity_id"])
         self.var_dev_kind.set(device.get("kind", "binary"))
         self.var_dev_shortcut.set(device.get("shortcut", ""))
+        self.var_dev_lead_time.set("" if device.get("lead_time_s") in (None, "") else str(device["lead_time_s"]))
         self.tree_states.delete(*self.tree_states.get_children())
         if device.get("kind") == "multi_state":
             for name, s in device.get("states", {}).items():
@@ -1646,6 +1918,14 @@ class SmokeSyncGUI(tk.Tk):
                       "on_data": {"entity_id": entity}, "off_data": {"entity_id": entity},
                       "shortcut": shortcut}
 
+        lead_str = self.var_dev_lead_time.get().strip()
+        if lead_str:
+            try:
+                device["lead_time_s"] = float(lead_str)
+            except ValueError:
+                messagebox.showwarning("Lead time invalido", "El lead time del dispositivo debe ser un numero.")
+                return
+
         original_name = getattr(self, "_editing_original_name", None)
         devices = [d for d in self.cfg.get("devices", [])
                    if d["name"].lower() not in (name.lower(), (original_name or "").lower())]
@@ -1658,6 +1938,7 @@ class SmokeSyncGUI(tk.Tk):
         self.var_dev_name.set("")
         self.var_dev_entity.set("")
         self.var_dev_shortcut.set("")
+        self.var_dev_lead_time.set("")
         self.var_dev_advanced.set(False)
         self._on_dev_advanced_toggle()
         self.tree_states.delete(*self.tree_states.get_children())
@@ -1706,6 +1987,38 @@ class SmokeSyncGUI(tk.Tk):
             self.log(f"Probando '{device['name']}' ({device['entity_id']})...")
             core.fire_device_async(self.cfg, device, 2.0, log=self.log, on_done=on_done)
 
+    def _test_fire_side(self, side):
+        """Dispara solo ON o solo OFF de un dispositivo binary/mqtt, sin
+        esperar ni disparar el otro lado despues - util para confirmar que
+        el payload de apagado realmente apaga (ej. un estrobo que quedo
+        prendido tras un 'Probar' con burst)."""
+        sel = self.tree_devices.selection()
+        if not sel:
+            messagebox.showinfo("Selecciona un dispositivo", "Elige un dispositivo de la lista primero.")
+            return
+        device = core.get_device(self.cfg, sel[0])
+        if not device:
+            return
+        kind = device.get("kind", "binary")
+        if kind not in ("binary", "mqtt"):
+            messagebox.showinfo("No aplica",
+                                 "'Probar ON/OFF' solo aplica a dispositivos binary o mqtt.\n"
+                                 "Para multi_state usa el combo de estados; para scene usa 'Probar'.")
+            return
+
+        self._set_device_status(device["name"], f"probando {side}...")
+
+        def on_done(ok, detail):
+            ts = time.strftime("%H:%M:%S")
+            text = f"{'OK' if ok else 'ERROR'} {ts} - {detail}"
+            self.status_queue.put((device["name"], text))
+
+        self.log(f"Probando '{device['name']}' -> {side}...")
+        if kind == "mqtt":
+            core.fire_mqtt_side_async(self.cfg, device, side, log=self.log, on_done=on_done)
+        else:
+            core.fire_binary_side_async(self.cfg, device, side, log=self.log, on_done=on_done)
+
     def _set_device_status(self, name, text):
         self.device_status[name] = text
         if self.tree_devices.exists(name):
@@ -1724,7 +2037,7 @@ class SmokeSyncGUI(tk.Tk):
             self.cfg[key] = val
         core.save_config(self.cfg)
         self.log("Configuracion guardada.")
-        messagebox.showinfo("SmokeSync", "Configuracion guardada.")
+        messagebox.showinfo("4DFX", "Configuracion guardada.")
 
     def test_connections(self):
         title, pos, playing, error = core.get_playback(self.cfg)
@@ -1745,13 +2058,32 @@ class SmokeSyncGUI(tk.Tk):
         else:
             self.log("[HA] Conexion OK.")
 
-    def start_sync(self):
+    def start_sync(self, auto=False):
+        """Arranca el motor de sincronizacion. Con auto=True (llamado desde
+        la vista previa de video o la deteccion automatica de cue sheet en
+        Estado/Control) las validaciones que fallan solo se registran en el
+        log, sin interrumpir con un dialogo modal. Devuelve True si arranco."""
+        def _fail(msg):
+            if auto:
+                self.log(f"[auto-sync] no arranco: {msg}")
+            else:
+                messagebox.showwarning("Configuracion incompleta", msg)
+            return False
+
+        if self.engine and self.engine.running:
+            return True
         if not self.cfg.get("devices"):
-            messagebox.showwarning("Sin dispositivos", "Agrega al menos un dispositivo en la pestana 'Dispositivos'.")
-            return
-        if not self.cfg.get("zidoo_ip") or not self.cfg.get("ha_url"):
-            messagebox.showwarning("Configuracion incompleta", "Completa Zidoo y Home Assistant en 'Configuracion'.")
-            return
+            return _fail("Agrega al menos un dispositivo en la pestana 'Dispositivos'.")
+        ptype = self.cfg.get("player_type", "zidoo")
+        if ptype == "zidoo" and not self.cfg.get("zidoo_ip"):
+            return _fail("Completa la IP del Zidoo en 'Configuracion'.")
+        if ptype == "vlc" and not self.cfg.get("vlc_url"):
+            return _fail("Completa la URL de VLC en 'Configuracion'.")
+        if ptype == "jriver" and not self.cfg.get("jriver_url"):
+            return _fail("Completa la URL de JRiver en 'Configuracion'.")
+        needs_ha = any(d.get("kind") != "mqtt" for d in self.cfg.get("devices", []))
+        if needs_ha and not self.cfg.get("ha_url"):
+            return _fail("Completa Home Assistant en 'Configuracion' (o usa solo dispositivos MQTT).")
 
         def on_state(title=None, pos=None, playing=None, sheet=None):
             self.state_queue.put((title, pos, playing, sheet, None))
@@ -1760,13 +2092,20 @@ class SmokeSyncGUI(tk.Tk):
         self.engine.start()
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
-        self.log("Sincronizacion iniciada.")
+        if hasattr(self, "btn_cues_start_sync"):
+            self.btn_cues_start_sync.config(state="disabled")
+            self.btn_cues_stop_sync.config(state="normal")
+        self.log("Sincronizacion iniciada" + (" (automatica)" if auto else "") + ".")
+        return True
 
     def stop_sync(self):
         if self.engine:
             self.engine.stop()
         self.btn_start.config(state="normal")
         self.btn_stop.config(state="disabled")
+        if hasattr(self, "btn_cues_start_sync"):
+            self.btn_cues_start_sync.config(state="normal")
+            self.btn_cues_stop_sync.config(state="disabled")
 
     def on_close(self):
         self._monitor_stop.set()
@@ -1777,7 +2116,7 @@ class SmokeSyncGUI(tk.Tk):
 
 def main():
     try:
-        app = SmokeSyncGUI()
+        app = DFXGui()
     except tk.TclError as e:
         print("No se pudo iniciar la interfaz grafica (tkinter no disponible).")
         print(f"Detalle: {e}")

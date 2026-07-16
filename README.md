@@ -1,4 +1,4 @@
-# SmokeSync — Control 4DX para peliculas y conciertos
+# 4DFX — Control de efectos 4D para peliculas y conciertos
 
 Sincroniza efectos fisicos (maquina de humo, ventiladores, luces, escenas,
 agua, estrobos...) controlados via **Home Assistant**, con los timestamps
@@ -10,21 +10,21 @@ red (REST API).
 
 ## Arquitectura
 
-- **`smokesync_core.py`** — logica compartida (sin GUI): conexion al Zidoo,
+- **`fdfx_core.py`** — logica compartida (sin GUI): conexion al Zidoo,
   llamadas a Home Assistant, modelo de dispositivos y cues, motor de
   sincronizacion (`SyncEngine`). Tanto la CLI como la GUI importan este
   modulo; no deberia haber logica duplicada entre ambas.
-- **`smokesync_gui.py`** — interfaz grafica (Tkinter, incluido con Python).
+- **`fdfx_gui.py`** — interfaz grafica (Tkinter, incluido con Python).
   Pestañas: Estado/Control, Dispositivos, Editor de Cues, Configuracion.
-- **`smokesync.py`** — CLI (`setup`, `probe`, `test-fire`, `run`, `gui`).
+- **`4dfx.py`** — CLI (`setup`, `probe`, `test-fire`, `run`, `gui`).
   Utilna para depurar sin abrir ventanas, o para correr `run` como
   servicio/systemd en un Raspberry Pi headless.
-- **`Abrir SmokeSync.command`** (macOS) / **`Abrir SmokeSync.bat`**
+- **`Abrir 4DFX.command`** (macOS) / **`Abrir 4DFX.bat`**
   (Windows) — lanzadores de doble clic que abren la GUI.
 
 ## Configuracion
 
-Se guarda en `~/.smokesync/config.json` (fuera de esta carpeta, por lo que
+Se guarda en `~/.4dfx/config.json` (fuera de esta carpeta, por lo que
 nunca se sube al repositorio ni se comparte por accidente — ahi vive
 tambien el token de Home Assistant).
 
@@ -84,7 +84,7 @@ comunidad AVS Forum ("4D Theater Wind Effect", formato
 
 ## Uso rapido
 
-1. `python3 smokesync_gui.py` (o doble clic en el lanzador).
+1. `python3 fdfx_gui.py` (o doble clic en el lanzador).
 2. Pestaña **Configuracion**: IP del Zidoo, URL/token de HA, guardar.
 3. Pestaña **Dispositivos**: agregar cada salida (humo, ventilador,
    escena de luces, etc).

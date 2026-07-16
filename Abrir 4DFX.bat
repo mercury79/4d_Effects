@@ -14,5 +14,5 @@ if not %errorlevel%==0 (
     %PY% -m pip install --user requests
 )
 
-%PY% smokesync_gui.py
+%PY% fdfx_gui.py
 pause
